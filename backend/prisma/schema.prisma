@@ -1,0 +1,221 @@
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+enum Role {
+  ADMIN
+  HR
+  TRAINER
+  INTERN
+  COLLEGE
+}
+
+enum TaskStatus {
+  ASSIGNED
+  SUBMITTED
+  NEEDS_IMPROVEMENT
+  DONE
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LEAVE
+  WEEK_OFF
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  fullName     String
+  role         Role
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  internProfile  InternProfile?
+  trainerProfile TrainerProfile?
+  collegeProfile CollegeProfile?
+
+  trainedGroups TrainingGroup[] @relation("GroupTrainer")
+  createdTasks  Task[]          @relation("TaskCreator")
+  feedbacks     Feedback[]
+  markedAttendance Attendance[] @relation("AttendanceMarker")
+
+  @@index([role])
+}
+
+model College {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  code      String?  @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  interns  InternProfile[]
+  profiles CollegeProfile[]
+}
+
+model InternProfile {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  phone     String?
+  collegeId String?
+  joinedAt  DateTime @default(now())
+
+  user         User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  college      College?        @relation(fields: [collegeId], references: [id])
+  memberships  GroupMember[]
+  assignments  TaskAssignment[]
+  attendance   Attendance[]
+
+  @@index([collegeId])
+}
+
+model TrainerProfile {
+  id     String  @id @default(cuid())
+  userId String  @unique
+  phone  String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model CollegeProfile {
+  id        String  @id @default(cuid())
+  userId    String  @unique
+  collegeId String
+  phone     String?
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  college College @relation(fields: [collegeId], references: [id])
+
+  @@index([collegeId])
+}
+
+model TrainingGroup {
+  id        String    @id @default(cuid())
+  name      String
+  batchLabel String?
+  trainerId String?
+  startDate DateTime?
+  endDate   DateTime?
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  trainer User?         @relation("GroupTrainer", fields: [trainerId], references: [id])
+  members GroupMember[]
+  tasks   Task[]
+
+  @@index([trainerId])
+}
+
+model GroupMember {
+  id             String    @id @default(cuid())
+  groupId        String
+  internId       String
+  isActive       Boolean   @default(true)
+  joinedAt       DateTime  @default(now())
+  leftAt         DateTime?
+
+  group  TrainingGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  intern InternProfile @relation(fields: [internId], references: [id], onDelete: Cascade)
+
+  @@index([groupId])
+  @@index([internId])
+  @@index([internId, isActive])
+}
+
+model Task {
+  id          String   @id @default(cuid())
+  title       String
+  description String   @db.Text
+  dueDate     DateTime?
+  groupId     String?
+  /// Saved in library for reuse across batches/dates (no assignment yet, or reusable content)
+  isLibrary   Boolean  @default(false)
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  group       TrainingGroup?  @relation(fields: [groupId], references: [id])
+  createdBy   User            @relation("TaskCreator", fields: [createdById], references: [id])
+  assignments TaskAssignment[]
+
+  @@index([groupId])
+  @@index([createdById])
+  @@index([isLibrary])
+}
+
+model TaskAssignment {
+  id         String     @id @default(cuid())
+  taskId     String
+  internId   String
+  status     TaskStatus @default(ASSIGNED)
+  /// Calendar date this work is for (used to compute Day N / Task M per intern)
+  forDate    DateTime   @db.Date
+  dayNumber  Int        @default(1)
+  taskNumber Int        @default(1)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  task       Task          @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  intern     InternProfile @relation(fields: [internId], references: [id], onDelete: Cascade)
+  submission Submission?
+
+  @@unique([taskId, internId])
+  @@index([internId])
+  @@index([internId, forDate])
+  @@index([status])
+}
+
+model Submission {
+  id            String   @id @default(cuid())
+  assignmentId  String   @unique
+  projectDetails String  @db.Text
+  githubUrl     String
+  liveUrl       String?
+  submittedAt   DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  assignment TaskAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  feedbacks  Feedback[]
+}
+
+model Feedback {
+  id           String     @id @default(cuid())
+  submissionId String
+  reviewerId   String
+  comment      String     @db.Text
+  newStatus    TaskStatus
+  createdAt    DateTime   @default(now())
+
+  submission Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  reviewer   User       @relation(fields: [reviewerId], references: [id])
+
+  @@index([submissionId])
+}
+
+model Attendance {
+  id        String           @id @default(cuid())
+  internId  String
+  date      DateTime         @db.Date
+  status    AttendanceStatus
+  markedById String?
+  note      String?
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  intern   InternProfile @relation(fields: [internId], references: [id], onDelete: Cascade)
+  markedBy User?         @relation("AttendanceMarker", fields: [markedById], references: [id])
+
+  @@unique([internId, date])
+  @@index([date])
+}

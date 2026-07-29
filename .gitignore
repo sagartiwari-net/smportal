@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+build/
+.vite/
+
+# Environment files (secrets)
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Prisma generated client
+backend/src/generated/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# MySQL local data
+.mysql-data/
+scripts/*.pid
+
+# Plan files (local only)
+*.plan.md
+
+# Cursor agent transcripts
+.cursor/
+agent-transcripts/
+
+# AI agent skills/config (auto-generated)
+backend/.agents/
+backend/.claude/
