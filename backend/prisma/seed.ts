@@ -41,6 +41,46 @@ async function main() {
   });
 
   await upsertUser({
+    email: "master@sagartiwari.net",
+    fullName: "Master Admin",
+    role: Role.ADMIN,
+    password: "master123",
+  });
+
+  const hrProd = await upsertUser({
+    email: "hr@sagartiwari.net",
+    fullName: "HR Admin",
+    role: Role.HR,
+    password: "hr123",
+  });
+
+  const trainerProd = await upsertUser({
+    email: "trainer@sagartiwari.net",
+    fullName: "Trainer",
+    role: Role.TRAINER,
+    password: "trainer123",
+  });
+
+  await prisma.trainerProfile.upsert({
+    where: { userId: trainerProd.id },
+    update: { phone: "9000000100" },
+    create: { userId: trainerProd.id, phone: "9000000100" },
+  });
+
+  const student = await upsertUser({
+    email: "student@sagartiwari.net",
+    fullName: "Student Intern",
+    role: Role.INTERN,
+    password: "student123",
+  });
+
+  await prisma.internProfile.upsert({
+    where: { userId: student.id },
+    update: { collegeId: college.id, phone: "9000000101" },
+    create: { userId: student.id, collegeId: college.id, phone: "9000000101" },
+  });
+
+  await upsertUser({
     email: "admin@smm.local",
     fullName: "Trusted Admin",
     role: Role.ADMIN,
@@ -154,7 +194,12 @@ async function main() {
     create: { internId: internProfile.id, date: d, status: "PRESENT", markedById: trainer.id },
   });
 
-  console.log("Seed complete. Demo logins (password: password123):");
+  console.log("Seed complete. Production logins:");
+  console.log("  master@sagartiwari.net  → ADMIN   (master123)");
+  console.log("  hr@sagartiwari.net      → HR      (hr123)");
+  console.log("  trainer@sagartiwari.net → TRAINER (trainer123)");
+  console.log("  student@sagartiwari.net → INTERN  (student123)");
+  console.log("Demo logins (password: password123):");
   console.log("  admin@smm.local    → ADMIN");
   console.log("  hr@smm.local       → HR");
   console.log("  trainer@smm.local  → TRAINER");
