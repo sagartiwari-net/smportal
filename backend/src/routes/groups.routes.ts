@@ -98,6 +98,115 @@ router.get("/", requireRole("ADMIN", "HR", "TRAINER", "INTERN", "COLLEGE"), asyn
   res.json({ groups });
 });
 
+/** Interns available to add to a group, college-wise (excludes current group members) */
+router.get("/available-interns", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
+  const excludeGroupId =
+    typeof req.query.excludeGroupId === "string" && req.query.excludeGroupId
+      ? req.query.excludeGroupId
+      : null;
+  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+
+  let scopeWhere: Record<string, unknown> = {};
+  if (req.user!.role === "TRAINER") {
+    const groupIds = await getTrainerGroupIds(req.user!.id);
+    const linked = groupIds.length
+      ? await prisma.groupMember.findMany({
+          where: { isActive: true, groupId: { in: groupIds } },
+          select: { internId: true },
+        })
+      : [];
+    const ids = [...new Set(linked.map((m) => m.internId))];
+    // Own-group interns + interns not in any active group yet
+    scopeWhere = {
+      OR: [{ id: { in: ids.length ? ids : ["__none__"] } }, { memberships: { none: { isActive: true } } }],
+    };
+  }
+
+  const profiles = await prisma.internProfile.findMany({
+    where: {
+      approvalStatus: "APPROVED",
+      ...scopeWhere,
+      user: {
+        isActive: true,
+        role: "INTERN",
+        ...(q
+          ? {
+              OR: [{ fullName: { contains: q } }, { email: { contains: q } }],
+            }
+          : {}),
+      },
+      ...(excludeGroupId
+        ? { memberships: { none: { groupId: excludeGroupId, isActive: true } } }
+        : {}),
+    },
+    select: {
+      id: true,
+      collegeId: true,
+      college: { select: { id: true, name: true } },
+      user: { select: { fullName: true, email: true } },
+      memberships: {
+        where: { isActive: true },
+        select: { group: { select: { id: true, name: true } } },
+      },
+    },
+    orderBy: { user: { fullName: "asc" } },
+  });
+
+  // For ADMIN/HR create-group: also include ungrouped + all colleges
+  // Trainer already filtered
+
+  type InternRow = {
+    internId: string;
+    fullName: string;
+    email: string;
+    otherGroups: { id: string; name: string }[];
+  };
+
+  const byCollege = new Map<string, { id: string; name: string; interns: InternRow[] }>();
+  const noCollege: InternRow[] = [];
+
+  for (const p of profiles) {
+    const otherGroups = p.memberships
+      .map((m) => m.group)
+      .filter((g) => !excludeGroupId || g.id !== excludeGroupId);
+    const row: InternRow = {
+      internId: p.id,
+      fullName: p.user.fullName,
+      email: p.user.email,
+      otherGroups,
+    };
+    if (p.college?.id) {
+      let bucket = byCollege.get(p.college.id);
+      if (!bucket) {
+        bucket = { id: p.college.id, name: p.college.name, interns: [] };
+        byCollege.set(p.college.id, bucket);
+      }
+      bucket.interns.push(row);
+    } else {
+      noCollege.push(row);
+    }
+  }
+
+  const colleges = [...byCollege.values()].sort((a, b) => a.name.localeCompare(b.name));
+  res.json({
+    colleges,
+    noCollege,
+    total: profiles.length,
+  });
+});
+
+async function assertUniqueGroupName(name: string, excludeId?: string) {
+  const trimmed = name.trim();
+  const existing = await prisma.trainingGroup.findFirst({
+    where: {
+      name: trimmed,
+      ...(excludeId ? { id: { not: excludeId } } : {}),
+    },
+    select: { id: true },
+  });
+  return !existing;
+}
+
 router.post("/", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
   const schema = z.object({
     name: z.string().min(2),
@@ -110,6 +219,11 @@ router.post("/", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: "Invalid payload" });
+
+  const unique = await assertUniqueGroupName(parsed.data.name);
+  if (!unique) {
+    return res.status(409).json({ message: "Group name already exists — choose a unique name" });
+  }
 
   const trainerId =
     req.user!.role === "TRAINER" ? req.user!.id : parsed.data.trainerId || null;
@@ -273,6 +387,13 @@ router.patch("/:id", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => 
   if (!group) return res.status(404).json({ message: "Group not found" });
   if (req.user!.role === "TRAINER" && !(await trainerOwnsGroup(req.user!.id, group.id))) {
     return res.status(403).json({ message: "Not your group" });
+  }
+
+  if (parsed.data.name) {
+    const unique = await assertUniqueGroupName(parsed.data.name, group.id);
+    if (!unique) {
+      return res.status(409).json({ message: "Group name already exists — choose a unique name" });
+    }
   }
 
   const updated = await prisma.trainingGroup.update({

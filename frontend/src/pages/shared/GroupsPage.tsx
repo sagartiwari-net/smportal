@@ -1,14 +1,22 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Pencil, Trash2, UserPlus, X } from "lucide-react";
 import { api } from "../../api/client";
 import { PageHeader } from "../../components/ui/PageHeader";
 import { useAuth } from "../../auth/AuthContext";
 
-type InternUser = {
-  id: string;
+type OtherGroup = { id: string; name: string };
+
+type AvailableIntern = {
+  internId: string;
   fullName: string;
   email: string;
-  internProfile?: { id: string; college?: { name: string } | null } | null;
+  otherGroups: OtherGroup[];
+};
+
+type CollegeBucket = {
+  id: string;
+  name: string;
+  interns: AvailableIntern[];
 };
 
 type Group = {
@@ -24,59 +32,236 @@ type Group = {
   }[];
 };
 
+function InternPicker({
+  colleges,
+  noCollege,
+  selected,
+  onToggle,
+  search,
+  onSearchChange,
+  loading,
+}: {
+  colleges: CollegeBucket[];
+  noCollege: AvailableIntern[];
+  selected: string[];
+  onToggle: (internId: string) => void;
+  search: string;
+  onSearchChange: (v: string) => void;
+  loading?: boolean;
+}) {
+  const [openKeys, setOpenKeys] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    // Open first college + no-college if present
+    const keys: string[] = [];
+    if (colleges[0]) keys.push(`c:${colleges[0].id}`);
+    if (noCollege.length) keys.push("none");
+    setOpenKeys(new Set(keys.slice(0, 2)));
+  }, [colleges, noCollege]);
+
+  function toggleOpen(key: string) {
+    setOpenKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function renderIntern(i: AvailableIntern) {
+    const inOther = i.otherGroups.length > 0;
+    return (
+      <label
+        key={i.internId}
+        className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-slate-50"
+      >
+        <input
+          type="checkbox"
+          className="mt-1"
+          checked={selected.includes(i.internId)}
+          onChange={() => onToggle(i.internId)}
+        />
+        <span className="min-w-0">
+          <span className="font-medium text-slate-900">{i.fullName}</span>
+          <span className="block text-xs text-slate-400">{i.email}</span>
+          {inOther && (
+            <span className="mt-0.5 block text-xs text-amber-700">
+              Already in: {i.otherGroups.map((g) => g.name).join(", ")}
+            </span>
+          )}
+        </span>
+      </label>
+    );
+  }
+
+  const sections: { key: string; title: string; count: number; interns: AvailableIntern[] }[] = [
+    ...colleges.map((c) => ({
+      key: `c:${c.id}`,
+      title: c.name,
+      count: c.interns.length,
+      interns: c.interns,
+    })),
+  ];
+  if (noCollege.length > 0) {
+    sections.push({
+      key: "none",
+      title: "No college (direct / manual)",
+      count: noCollege.length,
+      interns: noCollege,
+    });
+  }
+
+  return (
+    <div className="space-y-2">
+      <input
+        className="w-full rounded-lg border px-3 py-2 text-sm"
+        placeholder="Search name or email…"
+        value={search}
+        onChange={(e) => onSearchChange(e.target.value)}
+      />
+      {loading ? (
+        <p className="text-sm text-slate-500">Loading interns…</p>
+      ) : sections.length === 0 ? (
+        <p className="rounded-lg border border-dashed p-3 text-sm text-slate-500">
+          No available interns for this list.
+        </p>
+      ) : (
+        <div className="max-h-64 space-y-2 overflow-y-auto rounded-lg border p-2">
+          {sections.map((sec) => {
+            const open = openKeys.has(sec.key);
+            return (
+              <div key={sec.key} className="overflow-hidden rounded-lg border border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => toggleOpen(sec.key)}
+                  className="flex w-full items-center justify-between bg-slate-50 px-3 py-2 text-left text-sm font-medium text-slate-800 hover:bg-slate-100"
+                >
+                  <span>
+                    <span className="text-slate-400">{open ? "▾" : "▸"}</span> {sec.title}
+                  </span>
+                  <span className="rounded-full bg-white px-2 py-0.5 text-xs text-slate-600">{sec.count}</span>
+                </button>
+                {open && <div className="divide-y border-t bg-white">{sec.interns.map(renderIntern)}</div>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {selected.length > 0 && (
+        <p className="text-xs text-slate-500">{selected.length} selected</p>
+      )}
+    </div>
+  );
+}
+
 export function GroupsPage({ basePath }: { basePath: string }) {
   const { user } = useAuth();
   const canEdit = user?.role === "ADMIN" || user?.role === "HR" || user?.role === "TRAINER";
   const [groups, setGroups] = useState<Group[]>([]);
-  const [interns, setInterns] = useState<InternUser[]>([]);
   const [trainers, setTrainers] = useState<{ id: string; fullName: string }[]>([]);
   const [name, setName] = useState("");
   const [batchLabel, setBatchLabel] = useState("");
   const [trainerId, setTrainerId] = useState("");
   const [selectedInterns, setSelectedInterns] = useState<string[]>([]);
+  const [createMsg, setCreateMsg] = useState("");
+  const [createErr, setCreateErr] = useState("");
+
+  const [createColleges, setCreateColleges] = useState<CollegeBucket[]>([]);
+  const [createNoCollege, setCreateNoCollege] = useState<AvailableIntern[]>([]);
+  const [createSearch, setCreateSearch] = useState("");
+  const [createPoolLoading, setCreatePoolLoading] = useState(false);
+
   const [editing, setEditing] = useState<Group | null>(null);
   const [editName, setEditName] = useState("");
   const [editBatch, setEditBatch] = useState("");
   const [editTrainerId, setEditTrainerId] = useState("");
+  const [editErr, setEditErr] = useState("");
+
   const [addingTo, setAddingTo] = useState<Group | null>(null);
   const [addSelected, setAddSelected] = useState<string[]>([]);
   const [addMsg, setAddMsg] = useState("");
+  const [addColleges, setAddColleges] = useState<CollegeBucket[]>([]);
+  const [addNoCollege, setAddNoCollege] = useState<AvailableIntern[]>([]);
+  const [addSearch, setAddSearch] = useState("");
+  const [addLoading, setAddLoading] = useState(false);
 
-  async function load() {
+  async function loadGroups() {
     const g = await api.get("/groups");
     setGroups(g.data.groups);
-    if (canEdit) {
-      const u = await api.get("/users?role=INTERN");
-      setInterns(u.data.users);
-      if (user?.role === "HR" || user?.role === "ADMIN") {
-        const t = await api.get("/users?role=TRAINER");
-        setTrainers(t.data.users);
-      }
+    if (canEdit && (user?.role === "HR" || user?.role === "ADMIN")) {
+      const t = await api.get("/users?role=TRAINER");
+      setTrainers(t.data.users);
     }
   }
 
-  useEffect(() => {
-    void load();
+  const loadCreatePool = useCallback(
+    async (q = "") => {
+      if (!canEdit) return;
+      setCreatePoolLoading(true);
+      try {
+        const { data } = await api.get("/groups/available-interns", {
+          params: q.trim() ? { q: q.trim() } : undefined,
+        });
+        setCreateColleges(data.colleges || []);
+        setCreateNoCollege(data.noCollege || []);
+      } finally {
+        setCreatePoolLoading(false);
+      }
+    },
+    [canEdit],
+  );
+
+  const loadAddPool = useCallback(async (groupId: string, q = "") => {
+    setAddLoading(true);
+    try {
+      const { data } = await api.get("/groups/available-interns", {
+        params: {
+          excludeGroupId: groupId,
+          ...(q.trim() ? { q: q.trim() } : {}),
+        },
+      });
+      setAddColleges(data.colleges || []);
+      setAddNoCollege(data.noCollege || []);
+    } finally {
+      setAddLoading(false);
+    }
   }, []);
 
-  function toggleIntern(internProfileId: string) {
+  useEffect(() => {
+    void loadGroups();
+  }, []);
+
+  useEffect(() => {
+    if (canEdit) void loadCreatePool();
+  }, [canEdit, loadCreatePool]);
+
+  function toggleCreate(internId: string) {
     setSelectedInterns((prev) =>
-      prev.includes(internProfileId) ? prev.filter((id) => id !== internProfileId) : [...prev, internProfileId],
+      prev.includes(internId) ? prev.filter((id) => id !== internId) : [...prev, internId],
     );
   }
 
   async function onCreate(e: FormEvent) {
     e.preventDefault();
-    await api.post("/groups", {
-      name,
-      batchLabel: batchLabel || undefined,
-      trainerId: user?.role === "HR" || user?.role === "ADMIN" ? trainerId || undefined : undefined,
-      internIds: selectedInterns,
-    });
-    setName("");
-    setBatchLabel("");
-    setSelectedInterns([]);
-    await load();
+    setCreateMsg("");
+    setCreateErr("");
+    try {
+      await api.post("/groups", {
+        name,
+        batchLabel: batchLabel || undefined,
+        trainerId: user?.role === "HR" || user?.role === "ADMIN" ? trainerId || undefined : undefined,
+        internIds: selectedInterns,
+      });
+      setCreateMsg("Group created");
+      setName("");
+      setBatchLabel("");
+      setSelectedInterns([]);
+      await loadGroups();
+      await loadCreatePool(createSearch);
+    } catch (ex: unknown) {
+      const ax = ex as { response?: { data?: { message?: string } } };
+      setCreateErr(ax.response?.data?.message || "Could not create group");
+    }
   }
 
   function openEdit(g: Group) {
@@ -84,24 +269,32 @@ export function GroupsPage({ basePath }: { basePath: string }) {
     setEditName(g.name);
     setEditBatch(g.batchLabel || "");
     setEditTrainerId(g.trainerId || g.trainer?.id || "");
+    setEditErr("");
   }
 
   async function onSave(e: FormEvent) {
     e.preventDefault();
     if (!editing) return;
-    await api.patch(`/groups/${editing.id}`, {
-      name: editName,
-      batchLabel: editBatch || null,
-      ...(user?.role === "HR" || user?.role === "ADMIN" ? { trainerId: editTrainerId || null } : {}),
-    });
-    setEditing(null);
-    await load();
+    setEditErr("");
+    try {
+      await api.patch(`/groups/${editing.id}`, {
+        name: editName,
+        batchLabel: editBatch || null,
+        ...(user?.role === "HR" || user?.role === "ADMIN" ? { trainerId: editTrainerId || null } : {}),
+      });
+      setEditing(null);
+      await loadGroups();
+    } catch (ex: unknown) {
+      const ax = ex as { response?: { data?: { message?: string } } };
+      setEditErr(ax.response?.data?.message || "Could not save");
+    }
   }
 
   async function onDelete(g: Group) {
     if (!confirm(`Delete group “${g.name}”? Members will be unassigned from this group.`)) return;
     await api.delete(`/groups/${g.id}`);
-    await load();
+    await loadGroups();
+    await loadCreatePool(createSearch);
   }
 
   async function toggleComplete(g: Group) {
@@ -112,18 +305,15 @@ export function GroupsPage({ basePath }: { basePath: string }) {
         : `Reopen “${g.name}” internship?`;
     if (!confirm(msg)) return;
     await api.patch(`/groups/${g.id}/complete`, { internshipStatus: next });
-    await load();
+    await loadGroups();
   }
 
   function openAddMembers(g: Group) {
     setAddingTo(g);
     setAddSelected([]);
     setAddMsg("");
-  }
-
-  function availableInternsFor(g: Group) {
-    const memberIds = new Set((g.members || []).map((m) => m.internId));
-    return interns.filter((i) => i.internProfile?.id && !memberIds.has(i.internProfile.id));
+    setAddSearch("");
+    void loadAddPool(g.id);
   }
 
   async function onAddMembers(e: FormEvent) {
@@ -131,24 +321,41 @@ export function GroupsPage({ basePath }: { basePath: string }) {
     if (!addingTo || addSelected.length === 0) return;
     try {
       await api.post(`/groups/${addingTo.id}/members`, { internIds: addSelected });
-      setAddMsg("Interns added");
       setAddingTo(null);
-      await load();
+      await loadGroups();
+      await loadCreatePool(createSearch);
     } catch (ex: unknown) {
       const ax = ex as { response?: { data?: { message?: string } } };
       setAddMsg(ax.response?.data?.message || "Failed to add");
     }
   }
 
+  const createSearchDebounced = useMemo(() => createSearch, [createSearch]);
+
+  useEffect(() => {
+    if (!canEdit) return;
+    const t = setTimeout(() => void loadCreatePool(createSearchDebounced), 250);
+    return () => clearTimeout(t);
+  }, [createSearchDebounced, canEdit, loadCreatePool]);
+
+  useEffect(() => {
+    if (!addingTo) return;
+    const t = setTimeout(() => void loadAddPool(addingTo.id, addSearch), 250);
+    return () => clearTimeout(t);
+  }, [addSearch, addingTo, loadAddPool]);
+
   return (
     <div>
-      <PageHeader title="Training Groups" subtitle="Same-college split or cross-college mix" />
+      <PageHeader
+        title="Training Groups"
+        subtitle="College-wise intern picker · unique group names · shows other-group membership"
+      />
       {canEdit && (
         <form onSubmit={onCreate} className="mb-6 space-y-3 rounded-xl border bg-white p-4">
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <input
               className="rounded-lg border px-3 py-2.5 text-sm"
-              placeholder="Group name"
+              placeholder="Group name (must be unique)"
               required
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -175,20 +382,19 @@ export function GroupsPage({ basePath }: { basePath: string }) {
             )}
           </div>
           <div>
-            <p className="mb-2 text-sm font-medium text-slate-700">Add interns</p>
-            <div className="max-h-40 overflow-y-auto rounded-lg border p-2">
-              {interns.map((i) => {
-                const pid = i.internProfile?.id;
-                if (!pid) return null;
-                return (
-                  <label key={i.id} className="flex items-center gap-2 py-1 text-sm">
-                    <input type="checkbox" checked={selectedInterns.includes(pid)} onChange={() => toggleIntern(pid)} />
-                    {i.fullName} <span className="text-slate-400">({i.internProfile?.college?.name || "—"})</span>
-                  </label>
-                );
-              })}
-            </div>
+            <p className="mb-2 text-sm font-medium text-slate-700">Add interns (college-wise)</p>
+            <InternPicker
+              colleges={createColleges}
+              noCollege={createNoCollege}
+              selected={selectedInterns}
+              onToggle={toggleCreate}
+              search={createSearch}
+              onSearchChange={setCreateSearch}
+              loading={createPoolLoading}
+            />
           </div>
+          {createMsg && <p className="text-sm text-green-700">{createMsg}</p>}
+          {createErr && <p className="text-sm text-rose-600">{createErr}</p>}
           <button className="rounded-lg bg-green-600 px-4 py-2.5 text-sm text-white">Create group</button>
         </form>
       )}
@@ -215,13 +421,29 @@ export function GroupsPage({ basePath }: { basePath: string }) {
                   >
                     {g.internshipStatus === "COMPLETED" ? "Reopen" : "Complete"}
                   </button>
-                  <button type="button" onClick={() => openAddMembers(g)} className="rounded-lg p-2 text-green-700 hover:bg-green-50" aria-label="Add interns" title="Add interns">
+                  <button
+                    type="button"
+                    onClick={() => openAddMembers(g)}
+                    className="rounded-lg p-2 text-green-700 hover:bg-green-50"
+                    aria-label="Add interns"
+                    title="Add interns"
+                  >
                     <UserPlus className="h-4 w-4" />
                   </button>
-                  <button type="button" onClick={() => openEdit(g)} className="rounded-lg p-2 text-slate-600 hover:bg-slate-100" aria-label="Edit">
+                  <button
+                    type="button"
+                    onClick={() => openEdit(g)}
+                    className="rounded-lg p-2 text-slate-600 hover:bg-slate-100"
+                    aria-label="Edit"
+                  >
                     <Pencil className="h-4 w-4" />
                   </button>
-                  <button type="button" onClick={() => void onDelete(g)} className="rounded-lg p-2 text-red-600 hover:bg-red-50" aria-label="Delete">
+                  <button
+                    type="button"
+                    onClick={() => void onDelete(g)}
+                    className="rounded-lg p-2 text-red-600 hover:bg-red-50"
+                    aria-label="Delete"
+                  >
                     <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
@@ -229,9 +451,12 @@ export function GroupsPage({ basePath }: { basePath: string }) {
             </div>
             <ul className="mt-3 divide-y text-sm">
               {(g.members || []).map((m) => (
-                <li key={m.internId} className="flex justify-between py-2">
-                  <span>{m.intern.user.fullName}</span>
-                  <span className="text-slate-400">{m.intern.college?.name || "—"}</span>
+                <li key={m.internId} className="flex justify-between gap-2 py-2">
+                  <span>
+                    <span className="font-medium">{m.intern.user.fullName}</span>
+                    <span className="block text-xs text-slate-400">{m.intern.user.email}</span>
+                  </span>
+                  <span className="shrink-0 text-slate-400">{m.intern.college?.name || "No college"}</span>
                 </li>
               ))}
             </ul>
@@ -251,41 +476,35 @@ export function GroupsPage({ basePath }: { basePath: string }) {
 
       {addingTo && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center sm:p-4">
-          <form onSubmit={onAddMembers} className="max-h-[85vh] w-full overflow-y-auto rounded-t-2xl bg-white p-5 sm:max-w-md sm:rounded-2xl">
+          <form
+            onSubmit={onAddMembers}
+            className="max-h-[90vh] w-full overflow-y-auto rounded-t-2xl bg-white p-5 sm:max-w-lg sm:rounded-2xl"
+          >
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold">Add to {addingTo.name}</h2>
               <button type="button" onClick={() => setAddingTo(null)} className="rounded-lg p-1 hover:bg-slate-100">
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <div className="mb-4 max-h-60 space-y-1 overflow-y-auto rounded-lg border p-2">
-              {availableInternsFor(addingTo).map((i) => {
-                const pid = i.internProfile!.id;
-                return (
-                  <label key={i.id} className="flex items-center gap-2 py-1 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={addSelected.includes(pid)}
-                      onChange={() =>
-                        setAddSelected((prev) =>
-                          prev.includes(pid) ? prev.filter((x) => x !== pid) : [...prev, pid],
-                        )
-                      }
-                    />
-                    {i.fullName}
-                    <span className="text-slate-400">({i.internProfile?.college?.name || "—"})</span>
-                  </label>
-                );
-              })}
-              {availableInternsFor(addingTo).length === 0 && (
-                <p className="p-2 text-sm text-slate-500">All interns are already in this group (or none left).</p>
-              )}
-            </div>
-            {addMsg && <p className="mb-2 text-sm text-red-600">{addMsg}</p>}
+            <p className="mb-3 text-xs text-slate-500">
+              Only interns not already in this group. College-wise list · “Already in” shows other groups.
+            </p>
+            <InternPicker
+              colleges={addColleges}
+              noCollege={addNoCollege}
+              selected={addSelected}
+              onToggle={(id) =>
+                setAddSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+              }
+              search={addSearch}
+              onSearchChange={setAddSearch}
+              loading={addLoading}
+            />
+            {addMsg && <p className="mb-2 mt-2 text-sm text-red-600">{addMsg}</p>}
             <button
               type="submit"
               disabled={addSelected.length === 0}
-              className="w-full rounded-lg bg-green-600 py-2.5 text-sm font-medium text-white disabled:opacity-50"
+              className="mt-4 w-full rounded-lg bg-green-600 py-2.5 text-sm font-medium text-white disabled:opacity-50"
             >
               Add selected ({addSelected.length})
             </button>
@@ -302,10 +521,25 @@ export function GroupsPage({ basePath }: { basePath: string }) {
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <input className="mb-3 w-full rounded-lg border px-3 py-2.5 text-sm" required value={editName} onChange={(e) => setEditName(e.target.value)} />
-            <input className="mb-3 w-full rounded-lg border px-3 py-2.5 text-sm" value={editBatch} onChange={(e) => setEditBatch(e.target.value)} placeholder="Batch label" />
+            <input
+              className="mb-3 w-full rounded-lg border px-3 py-2.5 text-sm"
+              required
+              value={editName}
+              onChange={(e) => setEditName(e.target.value)}
+              placeholder="Group name (unique)"
+            />
+            <input
+              className="mb-3 w-full rounded-lg border px-3 py-2.5 text-sm"
+              value={editBatch}
+              onChange={(e) => setEditBatch(e.target.value)}
+              placeholder="Batch label"
+            />
             {(user?.role === "HR" || user?.role === "ADMIN") && (
-              <select className="mb-4 w-full rounded-lg border px-3 py-2.5 text-sm" value={editTrainerId} onChange={(e) => setEditTrainerId(e.target.value)}>
+              <select
+                className="mb-4 w-full rounded-lg border px-3 py-2.5 text-sm"
+                value={editTrainerId}
+                onChange={(e) => setEditTrainerId(e.target.value)}
+              >
                 <option value="">No trainer</option>
                 {trainers.map((t) => (
                   <option key={t.id} value={t.id}>
@@ -314,6 +548,7 @@ export function GroupsPage({ basePath }: { basePath: string }) {
                 ))}
               </select>
             )}
+            {editErr && <p className="mb-2 text-sm text-rose-600">{editErr}</p>}
             <button type="submit" className="w-full rounded-lg bg-green-600 py-2.5 text-sm font-medium text-white">
               Save
             </button>
