@@ -3,6 +3,10 @@ import { Pencil, Trash2, UserPlus, X } from "lucide-react";
 import { api } from "../../api/client";
 import { PageHeader } from "../../components/ui/PageHeader";
 import { useAuth } from "../../auth/AuthContext";
+import {
+  AnalyticsDrillPanel,
+  type DrillFrame,
+} from "./analytics/AnalyticsDrillPanel";
 
 type OtherGroup = { id: string; name: string };
 
@@ -28,7 +32,11 @@ type Group = {
   trainer?: { id?: string; fullName: string } | null;
   members: {
     internId: string;
-    intern: { id: string; user: { fullName: string; email: string }; college?: { name: string } | null };
+    intern: {
+      id: string;
+      user: { fullName: string; email: string };
+      college?: { name: string } | null;
+    };
   }[];
 };
 
@@ -40,6 +48,9 @@ function InternPicker({
   search,
   onSearchChange,
   loading,
+  onOpenIntern,
+  onOpenCollege,
+  onOpenGroup,
 }: {
   colleges: CollegeBucket[];
   noCollege: AvailableIntern[];
@@ -48,16 +59,12 @@ function InternPicker({
   search: string;
   onSearchChange: (v: string) => void;
   loading?: boolean;
+  onOpenIntern?: (internId: string, label: string) => void;
+  onOpenCollege?: (name: string) => void;
+  onOpenGroup?: (name: string) => void;
 }) {
+  // Default collapsed — open only when user clicks
   const [openKeys, setOpenKeys] = useState<Set<string>>(new Set());
-
-  useEffect(() => {
-    // Open first college + no-college if present
-    const keys: string[] = [];
-    if (colleges[0]) keys.push(`c:${colleges[0].id}`);
-    if (noCollege.length) keys.push("none");
-    setOpenKeys(new Set(keys.slice(0, 2)));
-  }, [colleges, noCollege]);
 
   function toggleOpen(key: string) {
     setOpenKeys((prev) => {
@@ -71,10 +78,7 @@ function InternPicker({
   function renderIntern(i: AvailableIntern) {
     const inOther = i.otherGroups.length > 0;
     return (
-      <label
-        key={i.internId}
-        className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-slate-50"
-      >
+      <div key={i.internId} className="flex items-start gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-slate-50">
         <input
           type="checkbox"
           className="mt-1"
@@ -82,24 +86,51 @@ function InternPicker({
           onChange={() => onToggle(i.internId)}
         />
         <span className="min-w-0">
-          <span className="font-medium text-slate-900">{i.fullName}</span>
+          {onOpenIntern ? (
+            <button
+              type="button"
+              className="font-medium text-green-800 underline-offset-2 hover:underline"
+              onClick={() => onOpenIntern(i.internId, i.fullName)}
+            >
+              {i.fullName}
+            </button>
+          ) : (
+            <span className="font-medium text-slate-900">{i.fullName}</span>
+          )}
           <span className="block text-xs text-slate-400">{i.email}</span>
           {inOther && (
             <span className="mt-0.5 block text-xs text-amber-700">
-              Already in: {i.otherGroups.map((g) => g.name).join(", ")}
+              Already in:{" "}
+              {i.otherGroups.map((g, idx) => (
+                <span key={g.id}>
+                  {idx > 0 ? ", " : ""}
+                  {onOpenGroup ? (
+                    <button
+                      type="button"
+                      className="underline-offset-2 hover:underline"
+                      onClick={() => onOpenGroup(g.name)}
+                    >
+                      {g.name}
+                    </button>
+                  ) : (
+                    g.name
+                  )}
+                </span>
+              ))}
             </span>
           )}
         </span>
-      </label>
+      </div>
     );
   }
 
-  const sections: { key: string; title: string; count: number; interns: AvailableIntern[] }[] = [
+  const sections: { key: string; title: string; count: number; interns: AvailableIntern[]; collegeName?: string }[] = [
     ...colleges.map((c) => ({
       key: `c:${c.id}`,
       title: c.name,
       count: c.interns.length,
       interns: c.interns,
+      collegeName: c.name,
     })),
   ];
   if (noCollege.length > 0) {
@@ -122,11 +153,9 @@ function InternPicker({
       {loading ? (
         <p className="text-sm text-slate-500">Loading interns…</p>
       ) : sections.length === 0 ? (
-        <p className="rounded-lg border border-dashed p-3 text-sm text-slate-500">
-          No available interns for this list.
-        </p>
+        <p className="rounded-lg border border-dashed p-3 text-sm text-slate-500">No available interns for this list.</p>
       ) : (
-        <div className="max-h-64 space-y-2 overflow-y-auto rounded-lg border p-2">
+        <div className="max-h-72 space-y-2 overflow-y-auto rounded-lg border p-2">
           {sections.map((sec) => {
             const open = openKeys.has(sec.key);
             return (
@@ -136,8 +165,29 @@ function InternPicker({
                   onClick={() => toggleOpen(sec.key)}
                   className="flex w-full items-center justify-between bg-slate-50 px-3 py-2 text-left text-sm font-medium text-slate-800 hover:bg-slate-100"
                 >
-                  <span>
-                    <span className="text-slate-400">{open ? "▾" : "▸"}</span> {sec.title}
+                  <span className="min-w-0 truncate">
+                    <span className="text-slate-400">{open ? "▾" : "▸"}</span>{" "}
+                    {sec.collegeName && onOpenCollege ? (
+                      <span
+                        role="link"
+                        tabIndex={0}
+                        className="text-green-800 underline-offset-2 hover:underline"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenCollege(sec.collegeName!);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.stopPropagation();
+                            onOpenCollege(sec.collegeName!);
+                          }
+                        }}
+                      >
+                        {sec.title}
+                      </span>
+                    ) : (
+                      sec.title
+                    )}
                   </span>
                   <span className="rounded-full bg-white px-2 py-0.5 text-xs text-slate-600">{sec.count}</span>
                 </button>
@@ -147,9 +197,7 @@ function InternPicker({
           })}
         </div>
       )}
-      {selected.length > 0 && (
-        <p className="text-xs text-slate-500">{selected.length} selected</p>
-      )}
+      {selected.length > 0 && <p className="text-xs text-slate-500">{selected.length} selected</p>}
     </div>
   );
 }
@@ -157,8 +205,15 @@ function InternPicker({
 export function GroupsPage({ basePath }: { basePath: string }) {
   const { user } = useAuth();
   const canEdit = user?.role === "ADMIN" || user?.role === "HR" || user?.role === "TRAINER";
+  const [tab, setTab] = useState<"groups" | "create">(canEdit ? "groups" : "groups");
+
   const [groups, setGroups] = useState<Group[]>([]);
   const [trainers, setTrainers] = useState<{ id: string; fullName: string }[]>([]);
+  const [openGroupIds, setOpenGroupIds] = useState<Set<string>>(new Set());
+  const [groupSearch, setGroupSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "ACTIVE" | "COMPLETED">("all");
+  const [memberSearch, setMemberSearch] = useState("");
+
   const [name, setName] = useState("");
   const [batchLabel, setBatchLabel] = useState("");
   const [trainerId, setTrainerId] = useState("");
@@ -184,6 +239,25 @@ export function GroupsPage({ basePath }: { basePath: string }) {
   const [addNoCollege, setAddNoCollege] = useState<AvailableIntern[]>([]);
   const [addSearch, setAddSearch] = useState("");
   const [addLoading, setAddLoading] = useState(false);
+
+  const [drill, setDrill] = useState<DrillFrame[]>([]);
+  const currentDrill = drill[drill.length - 1] ?? null;
+
+  function pushDrill(frame: DrillFrame) {
+    setDrill((d) => [...d, frame]);
+  }
+  function popDrill() {
+    setDrill((d) => d.slice(0, -1));
+  }
+  function openIntern(internId: string, label?: string) {
+    pushDrill({ kind: "intern", internId, label });
+  }
+  function openCollege(collegeName: string) {
+    pushDrill({ kind: "college", name: collegeName });
+  }
+  function openGroup(groupName: string) {
+    pushDrill({ kind: "group", name: groupName });
+  }
 
   async function loadGroups() {
     const g = await api.get("/groups");
@@ -232,13 +306,22 @@ export function GroupsPage({ basePath }: { basePath: string }) {
   }, []);
 
   useEffect(() => {
-    if (canEdit) void loadCreatePool();
-  }, [canEdit, loadCreatePool]);
+    if (canEdit && tab === "create") void loadCreatePool();
+  }, [canEdit, tab, loadCreatePool]);
 
   function toggleCreate(internId: string) {
     setSelectedInterns((prev) =>
       prev.includes(internId) ? prev.filter((id) => id !== internId) : [...prev, internId],
     );
+  }
+
+  function toggleGroupOpen(id: string) {
+    setOpenGroupIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }
 
   async function onCreate(e: FormEvent) {
@@ -258,6 +341,7 @@ export function GroupsPage({ basePath }: { basePath: string }) {
       setSelectedInterns([]);
       await loadGroups();
       await loadCreatePool(createSearch);
+      setTab("groups");
     } catch (ex: unknown) {
       const ax = ex as { response?: { data?: { message?: string } } };
       setCreateErr(ax.response?.data?.message || "Could not create group");
@@ -331,12 +415,11 @@ export function GroupsPage({ basePath }: { basePath: string }) {
   }
 
   const createSearchDebounced = useMemo(() => createSearch, [createSearch]);
-
   useEffect(() => {
-    if (!canEdit) return;
+    if (!canEdit || tab !== "create") return;
     const t = setTimeout(() => void loadCreatePool(createSearchDebounced), 250);
     return () => clearTimeout(t);
-  }, [createSearchDebounced, canEdit, loadCreatePool]);
+  }, [createSearchDebounced, canEdit, tab, loadCreatePool]);
 
   useEffect(() => {
     if (!addingTo) return;
@@ -344,13 +427,74 @@ export function GroupsPage({ basePath }: { basePath: string }) {
     return () => clearTimeout(t);
   }, [addSearch, addingTo, loadAddPool]);
 
+  const filteredGroups = useMemo(() => {
+    const q = groupSearch.trim().toLowerCase();
+    const mq = memberSearch.trim().toLowerCase();
+    return groups.filter((g) => {
+      if (statusFilter !== "all" && (g.internshipStatus || "ACTIVE") !== statusFilter) return false;
+      if (q) {
+        const hay = `${g.name} ${g.batchLabel || ""} ${g.trainer?.fullName || ""}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      if (mq) {
+        const hit = (g.members || []).some((m) => {
+          const s = `${m.intern.user.fullName} ${m.intern.user.email} ${m.intern.college?.name || ""}`.toLowerCase();
+          return s.includes(mq);
+        });
+        if (!hit) return false;
+      }
+      return true;
+    });
+  }, [groups, groupSearch, memberSearch, statusFilter]);
+
+  if (currentDrill) {
+    return (
+      <div>
+        <PageHeader title="Training Groups" subtitle="Drill-down details (same as Analytics)" />
+        <AnalyticsDrillPanel
+          frame={currentDrill}
+          filterQuery=""
+          onBack={popDrill}
+          onOpenCollege={openCollege}
+          onOpenGroup={openGroup}
+          onOpenIntern={openIntern}
+          onOpenDay={(date) => pushDrill({ kind: "day", date })}
+        />
+      </div>
+    );
+  }
+
   return (
     <div>
       <PageHeader
         title="Training Groups"
-        subtitle="College-wise intern picker · unique group names · shows other-group membership"
+        subtitle="Collapsed lists · click name / college / group to open details"
       />
-      {canEdit && (
+
+      <div className="mb-4 flex gap-1 overflow-x-auto rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
+        <button
+          type="button"
+          onClick={() => setTab("groups")}
+          className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium ${
+            tab === "groups" ? "bg-green-600 text-white" : "text-slate-600 hover:bg-slate-50"
+          }`}
+        >
+          Groups ({groups.length})
+        </button>
+        {canEdit && (
+          <button
+            type="button"
+            onClick={() => setTab("create")}
+            className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium ${
+              tab === "create" ? "bg-green-600 text-white" : "text-slate-600 hover:bg-slate-50"
+            }`}
+          >
+            Create group
+          </button>
+        )}
+      </div>
+
+      {tab === "create" && canEdit && (
         <form onSubmit={onCreate} className="mb-6 space-y-3 rounded-xl border bg-white p-4">
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <input
@@ -382,7 +526,9 @@ export function GroupsPage({ basePath }: { basePath: string }) {
             )}
           </div>
           <div>
-            <p className="mb-2 text-sm font-medium text-slate-700">Add interns (college-wise)</p>
+            <p className="mb-2 text-sm font-medium text-slate-700">
+              Add interns (college-wise · collapsed · click names for details)
+            </p>
             <InternPicker
               colleges={createColleges}
               noCollege={createNoCollege}
@@ -391,6 +537,9 @@ export function GroupsPage({ basePath }: { basePath: string }) {
               search={createSearch}
               onSearchChange={setCreateSearch}
               loading={createPoolLoading}
+              onOpenIntern={openIntern}
+              onOpenCollege={openCollege}
+              onOpenGroup={openGroup}
             />
           </div>
           {createMsg && <p className="text-sm text-green-700">{createMsg}</p>}
@@ -399,80 +548,159 @@ export function GroupsPage({ basePath }: { basePath: string }) {
         </form>
       )}
 
-      <div className="space-y-3">
-        {groups.map((g) => (
-          <div key={g.id} className="rounded-xl border bg-white p-4">
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <h3 className="font-semibold text-slate-900">{g.name}</h3>
-                <p className="text-xs text-slate-500">
-                  {g.batchLabel || "No batch"} · Trainer: {g.trainer?.fullName || "—"} · {g.members?.length || 0}{" "}
-                  members
-                  {g.internshipStatus === "COMPLETED" ? " · Internship completed" : ""}
-                </p>
-              </div>
-              {canEdit && (
-                <div className="flex shrink-0 flex-wrap gap-1">
-                  <button
-                    type="button"
-                    onClick={() => void toggleComplete(g)}
-                    className="rounded-lg border px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
-                    title="Complete / reopen internship"
-                  >
-                    {g.internshipStatus === "COMPLETED" ? "Reopen" : "Complete"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => openAddMembers(g)}
-                    className="rounded-lg p-2 text-green-700 hover:bg-green-50"
-                    aria-label="Add interns"
-                    title="Add interns"
-                  >
-                    <UserPlus className="h-4 w-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => openEdit(g)}
-                    className="rounded-lg p-2 text-slate-600 hover:bg-slate-100"
-                    aria-label="Edit"
-                  >
-                    <Pencil className="h-4 w-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void onDelete(g)}
-                    className="rounded-lg p-2 text-red-600 hover:bg-red-50"
-                    aria-label="Delete"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              )}
-            </div>
-            <ul className="mt-3 divide-y text-sm">
-              {(g.members || []).map((m) => (
-                <li key={m.internId} className="flex justify-between gap-2 py-2">
-                  <span>
-                    <span className="font-medium">{m.intern.user.fullName}</span>
-                    <span className="block text-xs text-slate-400">{m.intern.user.email}</span>
-                  </span>
-                  <span className="shrink-0 text-slate-400">{m.intern.college?.name || "No college"}</span>
-                </li>
-              ))}
-            </ul>
-            {canEdit && (
-              <button
-                type="button"
-                onClick={() => openAddMembers(g)}
-                className="mt-3 w-full rounded-lg border border-dashed border-green-300 py-2 text-sm font-medium text-green-700 hover:bg-green-50"
+      {tab === "groups" && (
+        <div className="space-y-3">
+          <div className="rounded-xl border bg-white p-3 shadow-sm">
+            <div className="grid gap-2 sm:grid-cols-3">
+              <input
+                className="rounded-lg border px-3 py-2 text-sm"
+                placeholder="Search groups / trainer / batch…"
+                value={groupSearch}
+                onChange={(e) => setGroupSearch(e.target.value)}
+              />
+              <input
+                className="rounded-lg border px-3 py-2 text-sm"
+                placeholder="Filter by student name / email / college…"
+                value={memberSearch}
+                onChange={(e) => setMemberSearch(e.target.value)}
+              />
+              <select
+                className="rounded-lg border px-3 py-2 text-sm"
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}
               >
-                + Add interns to this group
-              </button>
-            )}
+                <option value="all">All statuses</option>
+                <option value="ACTIVE">Active only</option>
+                <option value="COMPLETED">Completed only</option>
+              </select>
+            </div>
+            <p className="mt-2 text-xs text-slate-500">
+              Groups stay collapsed by default. Click header to expand members · click student / college / group name for
+              analytics-style details.
+            </p>
           </div>
-        ))}
-        {groups.length === 0 && <p className="text-sm text-slate-500">No groups yet.</p>}
-      </div>
+
+          {filteredGroups.map((g) => {
+            const open = openGroupIds.has(g.id);
+            const mq = memberSearch.trim().toLowerCase();
+            const members = (g.members || []).filter((m) => {
+              if (!mq) return true;
+              const s = `${m.intern.user.fullName} ${m.intern.user.email} ${m.intern.college?.name || ""}`.toLowerCase();
+              return s.includes(mq);
+            });
+            return (
+              <div key={g.id} className="overflow-hidden rounded-xl border bg-white shadow-sm">
+                <div className="flex items-start gap-2 p-3 sm:p-4">
+                  <button
+                    type="button"
+                    onClick={() => toggleGroupOpen(g.id)}
+                    className="mt-0.5 shrink-0 rounded p-1 text-slate-400 hover:bg-slate-100"
+                    aria-label={open ? "Collapse" : "Expand"}
+                  >
+                    {open ? "▾" : "▸"}
+                  </button>
+                  <div className="min-w-0 flex-1">
+                    <button
+                      type="button"
+                      className="text-left text-base font-semibold text-green-800 underline-offset-2 hover:underline"
+                      onClick={() => openGroup(g.name)}
+                    >
+                      {g.name}
+                    </button>
+                    <p className="text-xs text-slate-500">
+                      {g.batchLabel || "No batch"} · Trainer: {g.trainer?.fullName || "—"} · {g.members?.length || 0}{" "}
+                      members
+                      {g.internshipStatus === "COMPLETED" ? " · Internship completed" : ""}
+                    </p>
+                  </div>
+                  {canEdit && (
+                    <div className="flex shrink-0 flex-wrap gap-1">
+                      <button
+                        type="button"
+                        onClick={() => void toggleComplete(g)}
+                        className="rounded-lg border px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                      >
+                        {g.internshipStatus === "COMPLETED" ? "Reopen" : "Complete"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openAddMembers(g)}
+                        className="rounded-lg p-2 text-green-700 hover:bg-green-50"
+                        title="Add interns"
+                      >
+                        <UserPlus className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openEdit(g)}
+                        className="rounded-lg p-2 text-slate-600 hover:bg-slate-100"
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void onDelete(g)}
+                        className="rounded-lg p-2 text-red-600 hover:bg-red-50"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {open && (
+                  <div className="border-t">
+                    <ul className="divide-y text-sm">
+                      {members.map((m) => (
+                        <li key={m.internId} className="flex justify-between gap-2 px-4 py-2.5">
+                          <span className="min-w-0">
+                            <button
+                              type="button"
+                              className="font-medium text-green-800 underline-offset-2 hover:underline"
+                              onClick={() => openIntern(m.intern.id, m.intern.user.fullName)}
+                            >
+                              {m.intern.user.fullName}
+                            </button>
+                            <span className="block text-xs text-slate-400">{m.intern.user.email}</span>
+                          </span>
+                          {m.intern.college?.name ? (
+                            <button
+                              type="button"
+                              className="shrink-0 text-xs text-green-800 underline-offset-2 hover:underline"
+                              onClick={() => openCollege(m.intern.college!.name)}
+                            >
+                              {m.intern.college.name}
+                            </button>
+                          ) : (
+                            <span className="shrink-0 text-xs text-slate-400">No college</span>
+                          )}
+                        </li>
+                      ))}
+                      {members.length === 0 && (
+                        <li className="px-4 py-3 text-sm text-slate-500">No members match this filter.</li>
+                      )}
+                    </ul>
+                    {canEdit && (
+                      <div className="border-t p-3">
+                        <button
+                          type="button"
+                          onClick={() => openAddMembers(g)}
+                          className="w-full rounded-lg border border-dashed border-green-300 py-2 text-sm font-medium text-green-700 hover:bg-green-50"
+                        >
+                          + Add interns to this group
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {filteredGroups.length === 0 && (
+            <p className="rounded-xl border bg-white p-4 text-sm text-slate-500">No groups match your filters.</p>
+          )}
+        </div>
+      )}
 
       {addingTo && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center sm:p-4">
@@ -481,13 +709,18 @@ export function GroupsPage({ basePath }: { basePath: string }) {
             className="max-h-[90vh] w-full overflow-y-auto rounded-t-2xl bg-white p-5 sm:max-w-lg sm:rounded-2xl"
           >
             <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-lg font-semibold">Add to {addingTo.name}</h2>
+              <h2 className="text-lg font-semibold">
+                Add to{" "}
+                <button type="button" className="text-green-800 underline" onClick={() => openGroup(addingTo.name)}>
+                  {addingTo.name}
+                </button>
+              </h2>
               <button type="button" onClick={() => setAddingTo(null)} className="rounded-lg p-1 hover:bg-slate-100">
                 <X className="h-5 w-5" />
               </button>
             </div>
             <p className="mb-3 text-xs text-slate-500">
-              Only interns not already in this group. College-wise list · “Already in” shows other groups.
+              Colleges collapsed by default. Click student / college / group names for details.
             </p>
             <InternPicker
               colleges={addColleges}
@@ -499,6 +732,9 @@ export function GroupsPage({ basePath }: { basePath: string }) {
               search={addSearch}
               onSearchChange={setAddSearch}
               loading={addLoading}
+              onOpenIntern={openIntern}
+              onOpenCollege={openCollege}
+              onOpenGroup={openGroup}
             />
             {addMsg && <p className="mb-2 mt-2 text-sm text-red-600">{addMsg}</p>}
             <button
