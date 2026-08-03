@@ -946,6 +946,20 @@ router.get("/batches/export", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), 
   }
 });
 
+async function renumberLibraryOrders() {
+  const rows = await prisma.task.findMany({
+    where: { isLibrary: true },
+    orderBy: [{ libraryOrder: "asc" }, { createdAt: "asc" }],
+    select: { id: true },
+  });
+  let n = 1;
+  for (const row of rows) {
+    await prisma.task.update({ where: { id: row.id }, data: { libraryOrder: n } });
+    n += 1;
+  }
+  return rows.length;
+}
+
 router.get("/library", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
   const optionsOnly = req.query.options === "1" || req.query.options === "true";
   const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
@@ -1187,6 +1201,12 @@ router.post("/library", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) 
   res.status(201).json({ task });
 });
 
+/** Compact library numbers to 1…N (after mid-list deletes / messy edits) */
+router.post("/library/renumber", requireRole("ADMIN", "HR", "TRAINER"), async (_req, res) => {
+  const count = await renumberLibraryOrders();
+  res.json({ message: `Library renumbered 1…${count}`, count });
+});
+
 router.post("/:taskId/assign", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
   const schema = z.object({
     forDate: z.string().min(8),
@@ -1414,8 +1434,20 @@ router.patch("/:taskId", requireRole("ADMIN", "HR", "TRAINER"), async (req, res)
 
 router.delete("/:taskId", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
   try {
-    await prisma.task.delete({ where: { id: req.params.taskId } });
-    res.json({ message: "Task deleted" });
+    const existing = await prisma.task.findUnique({
+      where: { id: req.params.taskId },
+      select: { id: true, isLibrary: true },
+    });
+    if (!existing) return res.status(404).json({ message: "Task not found" });
+
+    await prisma.task.delete({ where: { id: existing.id } });
+
+    // If a library template was removed from the middle, compact #1…N
+    if (existing.isLibrary) {
+      await renumberLibraryOrders();
+    }
+
+    res.json({ message: "Task deleted", renumbered: existing.isLibrary });
   } catch {
     res.status(404).json({ message: "Task not found" });
   }

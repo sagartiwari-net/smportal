@@ -689,8 +689,14 @@ export function TasksPage() {
   }
 
   async function deleteLibrary(id: string) {
-    if (!confirm("Delete this saved task from library?")) return;
+    if (!confirm("Delete this saved task from library? Numbers will auto-fix (1, 2, 3…).")) return;
     await api.delete(`/tasks/${id}`);
+    await Promise.all([loadLibrary({ page: libPage }), loadLibraryOptions()]);
+  }
+
+  async function renumberLibrary() {
+    if (!confirm("Renumber all library tasks as #1, #2, #3… in current order?")) return;
+    await api.post("/tasks/library/renumber");
     await Promise.all([loadLibrary({ page: libPage }), loadLibraryOptions()]);
   }
 
@@ -1117,13 +1123,23 @@ export function TasksPage() {
       <div className="rounded-xl border bg-white p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-sm font-semibold text-slate-800">Task library</h3>
-          <PageSizeSelect
-            value={libLimit}
-            onChange={(n) => {
-              setLibLimit(n);
-              setLibPage(1);
-            }}
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              className="rounded-lg border px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+              onClick={() => void renumberLibrary()}
+              title="Fix gaps after mid-list deletes"
+            >
+              Fix numbering (1…N)
+            </button>
+            <PageSizeSelect
+              value={libLimit}
+              onChange={(n) => {
+                setLibLimit(n);
+                setLibPage(1);
+              }}
+            />
+          </div>
         </div>
         <form onSubmit={applyLibSearch} className="mb-3 flex flex-wrap gap-2">
           <input
