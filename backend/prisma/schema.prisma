@@ -289,17 +289,25 @@ model Task {
   groupId     String?
   /// Saved in library for reuse across batches/dates (no assignment yet, or reusable content)
   isLibrary   Boolean  @default(false)
+  /// Display / curriculum sequence in library (1st, 2nd, 3rd…)
+  libraryOrder Int?
+  /// If this task was cloned from a library template when assigning
+  sourceLibraryId String?
   createdById String
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   group       TrainingGroup?  @relation(fields: [groupId], references: [id])
   createdBy   User            @relation("TaskCreator", fields: [createdById], references: [id])
+  sourceLibrary Task?         @relation("LibraryClones", fields: [sourceLibraryId], references: [id], onDelete: SetNull)
+  libraryClones Task[]        @relation("LibraryClones")
   assignments TaskAssignment[]
 
   @@index([groupId])
   @@index([createdById])
   @@index([isLibrary])
+  @@index([libraryOrder])
+  @@index([sourceLibraryId])
 }
 
 model TaskAssignment {

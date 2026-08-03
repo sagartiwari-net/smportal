@@ -961,13 +961,31 @@ router.get("/library", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) =
       : {}),
   };
 
+  // Backfill missing libraryOrder once (1, 2, 3… by createdAt)
+  const missingOrder = await prisma.task.findMany({
+    where: { isLibrary: true, libraryOrder: null },
+    orderBy: { createdAt: "asc" },
+    select: { id: true },
+  });
+  if (missingOrder.length) {
+    const maxRow = await prisma.task.aggregate({
+      where: { isLibrary: true, libraryOrder: { not: null } },
+      _max: { libraryOrder: true },
+    });
+    let next = (maxRow._max.libraryOrder || 0) + 1;
+    for (const row of missingOrder) {
+      await prisma.task.update({ where: { id: row.id }, data: { libraryOrder: next } });
+      next += 1;
+    }
+  }
+
   // Lightweight list for assign dropdown (capped)
   if (optionsOnly) {
     const tasks = await prisma.task.findMany({
       where,
-      orderBy: { updatedAt: "desc" },
+      orderBy: [{ libraryOrder: "asc" }, { createdAt: "asc" }],
       take: 200,
-      select: { id: true, title: true },
+      select: { id: true, title: true, libraryOrder: true },
     });
     return res.json({ tasks });
   }
@@ -977,34 +995,192 @@ router.get("/library", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) =
     prisma.task.count({ where }),
     prisma.task.findMany({
       where,
-      orderBy: { updatedAt: "desc" },
+      orderBy: [{ libraryOrder: "asc" }, { createdAt: "asc" }],
       skip,
       take: limit,
       include: {
-        _count: { select: { assignments: true } },
         createdBy: { select: { fullName: true } },
       },
     }),
   ]);
+
+  const ids = tasks.map((t) => t.id);
+  const cloneAssignments =
+    ids.length === 0
+      ? []
+      : await prisma.taskAssignment.findMany({
+          where: {
+            task: {
+              OR: [{ id: { in: ids } }, { sourceLibraryId: { in: ids } }],
+            },
+          },
+          select: {
+            forDate: true,
+            createdAt: true,
+            intern: {
+              select: {
+                id: true,
+                user: { select: { fullName: true, email: true } },
+                memberships: {
+                  where: { isActive: true },
+                  take: 1,
+                  select: { group: { select: { id: true, name: true } } },
+                },
+              },
+            },
+            task: {
+              select: {
+                id: true,
+                sourceLibraryId: true,
+                group: { select: { id: true, name: true } },
+              },
+            },
+          },
+          orderBy: { createdAt: "desc" },
+        });
+
+  const byLibrary = new Map<
+    string,
+    {
+      totalAssignments: number;
+      assignees: {
+        internId: string;
+        fullName: string;
+        email: string;
+        groupName: string | null;
+        forDate: string;
+      }[];
+    }
+  >();
+
+  for (const a of cloneAssignments) {
+    const libId = a.task.sourceLibraryId || a.task.id;
+    if (!ids.includes(libId)) continue;
+    let bucket = byLibrary.get(libId);
+    if (!bucket) {
+      bucket = { totalAssignments: 0, assignees: [] };
+      byLibrary.set(libId, bucket);
+    }
+    bucket.totalAssignments += 1;
+    const groupName =
+      a.task.group?.name || a.intern.memberships[0]?.group.name || null;
+    // Dedupe intern in list (keep latest)
+    if (!bucket.assignees.some((x) => x.internId === a.intern.id)) {
+      bucket.assignees.push({
+        internId: a.intern.id,
+        fullName: a.intern.user.fullName,
+        email: a.intern.user.email,
+        groupName,
+        forDate: a.forDate.toISOString().slice(0, 10),
+      });
+    }
+  }
+
   res.json({
-    tasks,
+    tasks: tasks.map((t) => {
+      const hist = byLibrary.get(t.id);
+      return {
+        ...t,
+        assignmentCount: hist?.totalAssignments ?? 0,
+        assignees: hist?.assignees ?? [],
+        _count: { assignments: hist?.totalAssignments ?? 0 },
+      };
+    }),
     pagination: paginationMeta(page, limit, total),
   });
 });
+
+router.get(
+  "/library/:id/already-assigned",
+  requireRole("ADMIN", "HR", "TRAINER"),
+  async (req, res) => {
+    const groupId = typeof req.query.groupId === "string" ? req.query.groupId : undefined;
+    const internIdsRaw = typeof req.query.internIds === "string" ? req.query.internIds : "";
+    const internIdsParam = internIdsRaw
+      ? internIdsRaw.split(",").map((s) => s.trim()).filter(Boolean)
+      : undefined;
+
+    const library = await prisma.task.findUnique({ where: { id: req.params.id } });
+    if (!library || !library.isLibrary) {
+      return res.status(404).json({ message: "Library task not found" });
+    }
+
+    const deny = await assertTrainerTargets(req.user!.role, req.user!.id, groupId, internIdsParam);
+    if (deny) return res.status(403).json({ message: deny });
+
+    const targetInternIds = await resolveInternIds(groupId, internIdsParam);
+    if (!targetInternIds.length) {
+      return res.json({ alreadyAssigned: [], count: 0 });
+    }
+
+    const rows = await prisma.taskAssignment.findMany({
+      where: {
+        internId: { in: targetInternIds },
+        task: {
+          OR: [{ id: library.id }, { sourceLibraryId: library.id }],
+        },
+      },
+      select: {
+        forDate: true,
+        intern: {
+          select: {
+            id: true,
+            user: { select: { fullName: true, email: true } },
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const seen = new Set<string>();
+    const alreadyAssigned = [];
+    for (const r of rows) {
+      if (seen.has(r.intern.id)) continue;
+      seen.add(r.intern.id);
+      alreadyAssigned.push({
+        internId: r.intern.id,
+        fullName: r.intern.user.fullName,
+        email: r.intern.user.email,
+        lastForDate: r.forDate.toISOString().slice(0, 10),
+      });
+    }
+
+    res.json({
+      alreadyAssigned,
+      count: alreadyAssigned.length,
+      targetCount: targetInternIds.length,
+      message:
+        alreadyAssigned.length > 0
+          ? `Already assigned to ${alreadyAssigned.length} of ${targetInternIds.length} selected intern(s).`
+          : null,
+    });
+  },
+);
 
 router.post("/library", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
   const schema = z.object({
     title: z.string().min(2),
     description: z.string().min(5),
+    libraryOrder: z.number().int().positive().optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: "Title and description required" });
+
+  let libraryOrder = parsed.data.libraryOrder;
+  if (!libraryOrder) {
+    const maxRow = await prisma.task.aggregate({
+      where: { isLibrary: true },
+      _max: { libraryOrder: true },
+    });
+    libraryOrder = (maxRow._max.libraryOrder || 0) + 1;
+  }
 
   const task = await prisma.task.create({
     data: {
       title: parsed.data.title.trim(),
       description: parsed.data.description,
       isLibrary: true,
+      libraryOrder,
       createdById: req.user!.id,
     },
   });
@@ -1055,6 +1231,7 @@ router.post("/:taskId/assign", requireRole("ADMIN", "HR", "TRAINER"), async (req
           title: libraryOrTask.title,
           description: libraryOrTask.description,
           isLibrary: false,
+          sourceLibraryId: libraryOrTask.id,
           groupId: parsed.data.groupId || null,
           createdById: req.user!.id,
         },
@@ -1068,6 +1245,42 @@ router.post("/:taskId/assign", requireRole("ADMIN", "HR", "TRAINER"), async (req
     });
   }
 
+  // Who already received this library template (any prior clone)?
+  let alreadyAssigned: {
+    internId: string;
+    fullName: string;
+    email: string;
+    lastForDate: string;
+  }[] = [];
+  if (libraryOrTask.isLibrary) {
+    const prior = await prisma.taskAssignment.findMany({
+      where: {
+        internId: { in: targetInternIds },
+        task: {
+          OR: [{ id: libraryOrTask.id }, { sourceLibraryId: libraryOrTask.id }],
+          // exclude the fresh clone we just created (no assignments yet)
+          NOT: { id: task.id },
+        },
+      },
+      select: {
+        forDate: true,
+        intern: { select: { id: true, user: { select: { fullName: true, email: true } } } },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    const seen = new Set<string>();
+    for (const r of prior) {
+      if (seen.has(r.intern.id)) continue;
+      seen.add(r.intern.id);
+      alreadyAssigned.push({
+        internId: r.intern.id,
+        fullName: r.intern.user.fullName,
+        email: r.intern.user.email,
+        lastForDate: r.forDate.toISOString().slice(0, 10),
+      });
+    }
+  }
+
   const forDate = toDayDate(parsed.data.forDate);
   const { created, skipped } = await assignTaskToInterns(task.id, task.title, forDate, targetInternIds);
 
@@ -1077,9 +1290,14 @@ router.post("/:taskId/assign", requireRole("ADMIN", "HR", "TRAINER"), async (req
       await prisma.task.delete({ where: { id: task.id } }).catch(() => undefined);
     }
     return res.status(400).json({
-      message: `Already assigned to all ${skipped.length} selected intern(s). Open Manage → that group to review the existing task.`,
+      message:
+        alreadyAssigned.length > 0
+          ? `Already assigned earlier to all ${alreadyAssigned.length} selected intern(s). Open Manage to review, or pick another date/group.`
+          : `Already assigned to all ${skipped.length} selected intern(s). Open Manage → that group to review the existing task.`,
       assignedCount: 0,
       skippedCount: skipped.length,
+      alreadyAssigned,
+      alreadyAssignedCount: alreadyAssigned.length,
     });
   }
 
@@ -1089,6 +1307,12 @@ router.post("/:taskId/assign", requireRole("ADMIN", "HR", "TRAINER"), async (req
     assignments: created,
     assignedCount: created.length,
     skippedCount: skipped.length,
+    alreadyAssigned,
+    alreadyAssignedCount: alreadyAssigned.length,
+    warning:
+      alreadyAssigned.length > 0
+        ? `Note: ${alreadyAssigned.length} intern(s) already had this library task before (still assigned again for ${parsed.data.forDate}).`
+        : null,
   });
 });
 
@@ -1164,6 +1388,7 @@ router.patch("/:taskId", requireRole("ADMIN", "HR", "TRAINER"), async (req, res)
     description: z.string().min(5).optional(),
     dueDate: z.string().nullable().optional(),
     isLibrary: z.boolean().optional(),
+    libraryOrder: z.number().int().positive().optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: "Invalid payload" });
@@ -1178,6 +1403,7 @@ router.patch("/:taskId", requireRole("ADMIN", "HR", "TRAINER"), async (req, res)
           ? { dueDate: parsed.data.dueDate ? new Date(parsed.data.dueDate) : null }
           : {}),
         ...(parsed.data.isLibrary !== undefined ? { isLibrary: parsed.data.isLibrary } : {}),
+        ...(parsed.data.libraryOrder !== undefined ? { libraryOrder: parsed.data.libraryOrder } : {}),
       },
     });
     res.json({ task });

@@ -81,6 +81,15 @@ type LibraryTask = {
   id: string;
   title: string;
   description: string;
+  libraryOrder?: number | null;
+  assignmentCount?: number;
+  assignees?: {
+    internId: string;
+    fullName: string;
+    email: string;
+    groupName: string | null;
+    forDate: string;
+  }[];
   _count?: { assignments: number };
 };
 
@@ -231,7 +240,7 @@ export function TasksPage() {
   const [loadingBatch, setLoadingBatch] = useState(false);
 
   const [library, setLibrary] = useState<LibraryTask[]>([]);
-  const [libraryOptions, setLibraryOptions] = useState<{ id: string; title: string }[]>([]);
+  const [libraryOptions, setLibraryOptions] = useState<{ id: string; title: string; libraryOrder?: number | null }[]>([]);
   const [libPagination, setLibPagination] = useState<Pagination>({
     page: 1,
     limit: 10,
@@ -241,6 +250,17 @@ export function TasksPage() {
   const [libPage, setLibPage] = useState(1);
   const [libLimit, setLibLimit] = useState(10);
   const [libSearch, setLibSearch] = useState("");
+  const [expandedLib, setExpandedLib] = useState<Record<string, boolean>>({});
+  const [editingLib, setEditingLib] = useState<LibraryTask | null>(null);
+  const [editLibTitle, setEditLibTitle] = useState("");
+  const [editLibDesc, setEditLibDesc] = useState("");
+  const [editLibOrder, setEditLibOrder] = useState("1");
+  const [alreadyAssignedWarn, setAlreadyAssignedWarn] = useState<{
+    count: number;
+    names: string[];
+    message: string | null;
+  } | null>(null);
+  const [saveLibOrder, setSaveLibOrder] = useState("");
 
   const [groups, setGroups] = useState<{ id: string; name: string }[]>([]);
   const [mode, setMode] = useState<"assign" | "save">("assign");
@@ -454,6 +474,37 @@ export function TasksPage() {
     setLibraryOptions(data.tasks || []);
   }
 
+  async function checkAlreadyAssigned(libId: string, gId: string) {
+    if (!libId || !gId) {
+      setAlreadyAssignedWarn(null);
+      return;
+    }
+    try {
+      const { data } = await api.get(`/tasks/library/${libId}/already-assigned`, {
+        params: { groupId: gId },
+      });
+      if (data.count > 0) {
+        setAlreadyAssignedWarn({
+          count: data.count,
+          names: (data.alreadyAssigned || []).map((x: { fullName: string }) => x.fullName),
+          message: data.message,
+        });
+      } else {
+        setAlreadyAssignedWarn(null);
+      }
+    } catch {
+      setAlreadyAssignedWarn(null);
+    }
+  }
+
+  useEffect(() => {
+    if (mode === "assign" && libraryTaskId && groupId) {
+      void checkAlreadyAssigned(libraryTaskId, groupId);
+    } else {
+      setAlreadyAssignedWarn(null);
+    }
+  }, [mode, libraryTaskId, groupId]);
+
   useEffect(() => {
     void loadGroups();
   }, []);
@@ -509,16 +560,22 @@ export function TasksPage() {
     setFormErr("");
     try {
       if (mode === "save") {
-        await api.post("/tasks/library", { title, description });
+        await api.post("/tasks/library", {
+          title,
+          description,
+          ...(saveLibOrder.trim() ? { libraryOrder: Number(saveLibOrder) } : {}),
+        });
         setFormMsg("Saved to library — assign anytime to any group/date");
         setTitle("");
         setDescription("");
+        setSaveLibOrder("");
         await Promise.all([loadLibrary({ page: libPage }), loadLibraryOptions()]);
         return;
       }
 
       let assignedCount = 0;
       let skippedCount = 0;
+      let successMsg = "";
       const assignGroupId = groupId;
 
       if (libraryTaskId) {
@@ -528,6 +585,11 @@ export function TasksPage() {
         });
         assignedCount = data.assignedCount ?? 0;
         skippedCount = data.skippedCount ?? 0;
+        if (data.warning) {
+          successMsg =
+            `Assigned to ${assignedCount} intern(s). ${data.warning}` +
+            (assignGroupId ? " · Manage tab me group open karke dekho" : "");
+        }
       } else {
         const { data } = await api.post("/tasks", {
           title,
@@ -550,19 +612,19 @@ export function TasksPage() {
         );
       } else {
         setFormMsg(
-          `Assigned to ${assignedCount} intern(s)` +
-            (skippedCount ? ` · ${skippedCount} already had it (skipped)` : "") +
-            " · Manage tab me group open karke dekho",
+          successMsg ||
+            `Assigned to ${assignedCount} intern(s)` +
+              (skippedCount ? ` · ${skippedCount} already had it (skipped)` : "") +
+              " · Manage tab me group open karke dekho",
         );
-        // Jump to Manage and open that group so the new task is visible
-        if (assignGroupId) {
-          setStaffTab("manage");
-          setSelectedBatch(null);
-          setOpenGroupId(assignGroupId);
-          setGroupPage(1);
-          await loadGroupSummaries();
-          await loadGroupBatches(assignGroupId, { page: 1 });
-        }
+      }
+      if (assignedCount > 0 && assignGroupId) {
+        setStaffTab("manage");
+        setSelectedBatch(null);
+        setOpenGroupId(assignGroupId);
+        setGroupPage(1);
+        await loadGroupSummaries();
+        await loadGroupBatches(assignGroupId, { page: 1 });
       }
 
       await Promise.all([loadLibrary({ page: libPage }), loadLibraryOptions()]);
@@ -629,6 +691,25 @@ export function TasksPage() {
   async function deleteLibrary(id: string) {
     if (!confirm("Delete this saved task from library?")) return;
     await api.delete(`/tasks/${id}`);
+    await Promise.all([loadLibrary({ page: libPage }), loadLibraryOptions()]);
+  }
+
+  function openLibEdit(t: LibraryTask) {
+    setEditingLib(t);
+    setEditLibTitle(t.title);
+    setEditLibDesc(t.description);
+    setEditLibOrder(String(t.libraryOrder || 1));
+  }
+
+  async function saveLibEdit(e: FormEvent) {
+    e.preventDefault();
+    if (!editingLib) return;
+    await api.patch(`/tasks/${editingLib.id}`, {
+      title: editLibTitle,
+      description: editLibDesc,
+      libraryOrder: Number(editLibOrder) || 1,
+    });
+    setEditingLib(null);
     await Promise.all([loadLibrary({ page: libPage }), loadLibraryOptions()]);
   }
 
@@ -934,11 +1015,25 @@ export function TasksPage() {
               <option value="">— New task (fill title below) —</option>
               {libraryOptions.map((t) => (
                 <option key={t.id} value={t.id}>
-                  {t.title}
+                  #{t.libraryOrder ?? "—"} · {t.title}
                 </option>
               ))}
             </select>
           </label>
+        )}
+
+        {mode === "assign" && alreadyAssignedWarn && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+            <p className="font-semibold">Already assigned</p>
+            <p className="mt-0.5 text-xs">
+              {alreadyAssignedWarn.message ||
+                `${alreadyAssignedWarn.count} intern(s) already received this library task.`}
+            </p>
+            <p className="mt-1 text-xs text-amber-800">
+              {alreadyAssignedWarn.names.slice(0, 8).join(", ")}
+              {alreadyAssignedWarn.names.length > 8 ? ` +${alreadyAssignedWarn.names.length - 8} more` : ""}
+            </p>
+          </div>
         )}
 
         {!libraryTaskId && (
@@ -958,6 +1053,19 @@ export function TasksPage() {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
             />
+            {mode === "save" && (
+              <label className="block text-sm text-slate-600">
+                Library number (optional — 1st, 2nd, 3rd…)
+                <input
+                  type="number"
+                  min={1}
+                  className="mt-1 w-full rounded-lg border px-3 py-2.5 text-sm"
+                  placeholder="Auto next number if empty"
+                  value={saveLibOrder}
+                  onChange={(e) => setSaveLibOrder(e.target.value)}
+                />
+              </label>
+            )}
           </>
         )}
 
@@ -1032,35 +1140,137 @@ export function TasksPage() {
           <p className="text-sm text-slate-500">No saved tasks yet.</p>
         ) : (
           <ul className="space-y-2">
-            {library.map((t) => (
-              <li key={t.id} className="flex items-start justify-between gap-2 rounded-lg border border-slate-100 px-3 py-2 text-sm">
-                <div>
-                  <p className="font-medium">{t.title}</p>
-                  <p className="line-clamp-1 text-xs text-slate-500">{t.description}</p>
-                  <p className="text-xs text-slate-400">Assigned {t._count?.assignments ?? 0} time(s)</p>
-                </div>
-                <div className="flex shrink-0 gap-1">
-                  <button
-                    type="button"
-                    className="rounded-lg border px-2 py-1 text-xs"
-                    onClick={() => {
-                      setMode("assign");
-                      setLibraryTaskId(t.id);
-                      window.scrollTo({ top: 0, behavior: "smooth" });
-                    }}
-                  >
-                    Assign
-                  </button>
-                  <button type="button" className="rounded-lg p-1 text-red-600 hover:bg-red-50" onClick={() => void deleteLibrary(t.id)}>
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              </li>
-            ))}
+            {library.map((t) => {
+              const open = !!expandedLib[t.id];
+              const n = t.libraryOrder ?? "—";
+              const count = t.assignmentCount ?? t._count?.assignments ?? 0;
+              return (
+                <li key={t.id} className="overflow-hidden rounded-lg border border-slate-200">
+                  <div className="flex items-center gap-2 px-3 py-2.5">
+                    <button
+                      type="button"
+                      className="flex min-w-0 flex-1 items-center gap-2 text-left text-sm"
+                      onClick={() => setExpandedLib((m) => ({ ...m, [t.id]: !open }))}
+                    >
+                      <span className="text-slate-400">{open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</span>
+                      <span className="shrink-0 rounded-md bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-700">
+                        #{n}
+                      </span>
+                      <span className="truncate font-medium text-slate-900">{t.title}</span>
+                      <span className="ml-auto shrink-0 text-xs text-slate-400">{count} assigned</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-lg border px-2 py-1 text-xs"
+                      onClick={() => {
+                        setMode("assign");
+                        setLibraryTaskId(t.id);
+                        window.scrollTo({ top: 0, behavior: "smooth" });
+                      }}
+                    >
+                      Assign
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-lg p-1 text-slate-600 hover:bg-slate-100"
+                      title="Edit"
+                      onClick={() => openLibEdit(t)}
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-lg p-1 text-red-600 hover:bg-red-50"
+                      onClick={() => void deleteLibrary(t.id)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                  {open && (
+                    <div className="space-y-2 border-t bg-slate-50 px-3 py-3 text-sm">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Details</p>
+                        <p className="mt-1 whitespace-pre-wrap text-slate-700">{t.description}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          Assigned to ({t.assignees?.length ?? 0} unique intern
+                          {(t.assignees?.length ?? 0) === 1 ? "" : "s"})
+                        </p>
+                        {(t.assignees?.length ?? 0) === 0 ? (
+                          <p className="mt-1 text-xs text-slate-500">Not assigned to anyone yet.</p>
+                        ) : (
+                          <ul className="mt-1 max-h-40 space-y-1 overflow-y-auto text-xs text-slate-700">
+                            {(t.assignees || []).map((a) => (
+                              <li key={a.internId} className="flex flex-wrap justify-between gap-2 rounded bg-white px-2 py-1.5">
+                                <span>
+                                  <span className="font-medium">{a.fullName}</span>
+                                  <span className="text-slate-400"> · {a.email}</span>
+                                </span>
+                                <span className="text-slate-500">
+                                  {a.groupName || "—"} · {a.forDate}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
         <Pager pagination={libPagination} onChange={setLibPage} />
       </div>
+
+      {editingLib && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <form onSubmit={saveLibEdit} className="w-full max-w-md space-y-3 rounded-xl bg-white p-4 shadow-lg">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold">Edit library task</h3>
+              <button type="button" className="rounded p-1 hover:bg-slate-100" onClick={() => setEditingLib(null)}>
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <label className="block text-xs text-slate-600">
+              Number (#)
+              <input
+                type="number"
+                min={1}
+                required
+                className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+                value={editLibOrder}
+                onChange={(e) => setEditLibOrder(e.target.value)}
+              />
+            </label>
+            <input
+              required
+              className="w-full rounded-lg border px-3 py-2 text-sm"
+              value={editLibTitle}
+              onChange={(e) => setEditLibTitle(e.target.value)}
+              placeholder="Title"
+            />
+            <textarea
+              required
+              rows={4}
+              className="w-full rounded-lg border px-3 py-2 text-sm"
+              value={editLibDesc}
+              onChange={(e) => setEditLibDesc(e.target.value)}
+              placeholder="Description"
+            />
+            <div className="flex justify-end gap-2">
+              <button type="button" className="rounded-lg border px-3 py-2 text-sm" onClick={() => setEditingLib(null)}>
+                Cancel
+              </button>
+              <button type="submit" className="rounded-lg bg-green-600 px-3 py-2 text-sm text-white">
+                Save
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </>
   );
 
