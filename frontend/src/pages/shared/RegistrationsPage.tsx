@@ -101,8 +101,10 @@ export function RegistrationsPage() {
         api.get("/users"),
       ]);
       setPending(p.data.interns || []);
-      const names = [...new Set((p.data.interns || []).map((i: PendingIntern) => i.college?.name || "No college"))];
-      setOpenColleges(new Set(names.slice(0, 1)));
+      const collegeNames = (p.data.interns || []).map(
+        (i: PendingIntern) => String(i.college?.name || "No college"),
+      );
+      setOpenColleges(new Set(collegeNames.slice(0, 1)));
       setInvites(inv.data.invites || []);
       setColleges(c.data.colleges || []);
       setGroups((g.data.groups || []).map((x: Group) => ({ id: x.id, name: x.name })));
