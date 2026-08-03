@@ -86,7 +86,10 @@ export function UsersPage() {
     setMsg("");
     setErr("");
     try {
-      await api.post("/users", form);
+      await api.post("/users", {
+        ...form,
+        collegeId: form.collegeId || undefined,
+      });
       setMsg("User created");
       setForm((f) => ({ ...f, email: "", fullName: "", phone: "" }));
       await load();
@@ -160,9 +163,17 @@ export function UsersPage() {
           {roleOptions()}
         </select>
         <input className="rounded-lg border px-3 py-2.5 text-sm" placeholder="Phone" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
-        {(form.role === "INTERN" || form.role === "COLLEGE") && (
+        {form.role === "COLLEGE" && (
           <select className="rounded-lg border px-3 py-2.5 text-sm" required value={form.collegeId} onChange={(e) => setForm({ ...form, collegeId: e.target.value })}>
             <option value="">Select college</option>
+            {colleges.map((c) => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
+        )}
+        {form.role === "INTERN" && (
+          <select className="rounded-lg border px-3 py-2.5 text-sm" value={form.collegeId} onChange={(e) => setForm({ ...form, collegeId: e.target.value })}>
+            <option value="">No college (direct hire)</option>
             {colleges.map((c) => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}

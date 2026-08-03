@@ -16,6 +16,7 @@ type Group = {
   name: string;
   batchLabel?: string | null;
   trainerId?: string | null;
+  internshipStatus?: string;
   trainer?: { id?: string; fullName: string } | null;
   members: {
     internId: string;
@@ -100,6 +101,17 @@ export function GroupsPage({ basePath }: { basePath: string }) {
   async function onDelete(g: Group) {
     if (!confirm(`Delete group “${g.name}”? Members will be unassigned from this group.`)) return;
     await api.delete(`/groups/${g.id}`);
+    await load();
+  }
+
+  async function toggleComplete(g: Group) {
+    const next = g.internshipStatus === "COMPLETED" ? "ACTIVE" : "COMPLETED";
+    const msg =
+      next === "COMPLETED"
+        ? `Mark “${g.name}” internship COMPLETED? Members will be completed and attendance will lock.`
+        : `Reopen “${g.name}” internship?`;
+    if (!confirm(msg)) return;
+    await api.patch(`/groups/${g.id}/complete`, { internshipStatus: next });
     await load();
   }
 
@@ -190,10 +202,19 @@ export function GroupsPage({ basePath }: { basePath: string }) {
                 <p className="text-xs text-slate-500">
                   {g.batchLabel || "No batch"} · Trainer: {g.trainer?.fullName || "—"} · {g.members?.length || 0}{" "}
                   members
+                  {g.internshipStatus === "COMPLETED" ? " · Internship completed" : ""}
                 </p>
               </div>
               {canEdit && (
-                <div className="flex shrink-0 gap-1">
+                <div className="flex shrink-0 flex-wrap gap-1">
+                  <button
+                    type="button"
+                    onClick={() => void toggleComplete(g)}
+                    className="rounded-lg border px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                    title="Complete / reopen internship"
+                  >
+                    {g.internshipStatus === "COMPLETED" ? "Reopen" : "Complete"}
+                  </button>
                   <button type="button" onClick={() => openAddMembers(g)} className="rounded-lg p-2 text-green-700 hover:bg-green-50" aria-label="Add interns" title="Add interns">
                     <UserPlus className="h-4 w-4" />
                   </button>

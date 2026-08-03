@@ -20,10 +20,23 @@ router.post("/login", async (req, res) => {
   }
 
   const email = parsed.data.email.toLowerCase().trim();
-  const user = await prisma.user.findUnique({ where: { email } });
+  const user = await prisma.user.findUnique({
+    where: { email },
+    include: { internProfile: { select: { approvalStatus: true, expiresAt: true } } },
+  });
 
   if (!user || !user.isActive) {
     return res.status(401).json({ message: "Invalid email or password" });
+  }
+
+  if (user.role === "INTERN" && user.internProfile?.approvalStatus === "PENDING") {
+    return res.status(403).json({
+      message: "Your account is waiting for Admin/HR approval. Please try again after approval.",
+    });
+  }
+
+  if (user.role === "INTERN" && user.internProfile?.approvalStatus === "REJECTED") {
+    return res.status(403).json({ message: "Your registration was rejected. Contact your college coordinator." });
   }
 
   const ok = await verifyPassword(parsed.data.password, user.passwordHash);

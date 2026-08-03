@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { getTrainerGroupIds, syncPrimaryGroupTrainer, trainerOwnsGroup } from "../services/trainerScope";
 
 const router = Router();
 router.use(requireAuth);
@@ -15,15 +16,22 @@ router.get("/", requireRole("ADMIN", "HR", "TRAINER", "INTERN", "COLLEGE"), asyn
   const role = req.user!.role;
 
   if (role === "TRAINER") {
+    const myIds = await getTrainerGroupIds(req.user!.id);
     const groups = await prisma.trainingGroup.findMany({
-      where: { trainerId: req.user!.id, isActive: true },
+      where: {
+        id: { in: myIds },
+        isActive: true,
+        // Hide empty leftover groups from demos / mis-assigns
+        members: { some: { isActive: true, intern: { approvalStatus: "APPROVED" } } },
+      },
       include: {
         trainer: { select: { id: true, fullName: true, email: true } },
+        trainers: { include: { trainer: { select: { id: true, fullName: true, email: true } } } },
         members: {
-          where: { isActive: true },
+          where: { isActive: true, intern: { approvalStatus: "APPROVED" } },
           include: { intern: { include: { user: { select: { id: true, fullName: true, email: true } }, college: true } } },
         },
-        _count: { select: { members: { where: { isActive: true } } } },
+        _count: { select: { members: { where: { isActive: true, intern: { approvalStatus: "APPROVED" } } } } },
       },
       orderBy: { createdAt: "desc" },
     });
@@ -52,12 +60,20 @@ router.get("/", requireRole("ADMIN", "HR", "TRAINER", "INTERN", "COLLEGE"), asyn
     const groups = await prisma.trainingGroup.findMany({
       where: {
         isActive: true,
-        members: { some: { isActive: true, intern: { collegeId: profile.collegeId } } },
+        members: {
+          some: {
+            isActive: true,
+            intern: { collegeId: profile.collegeId, approvalStatus: "APPROVED" },
+          },
+        },
       },
       include: {
         trainer: { select: { id: true, fullName: true } },
         members: {
-          where: { isActive: true, intern: { collegeId: profile.collegeId } },
+          where: {
+            isActive: true,
+            intern: { collegeId: profile.collegeId, approvalStatus: "APPROVED" },
+          },
           include: { intern: { include: { user: { select: { id: true, fullName: true, email: true } } } } },
         },
       },
@@ -70,11 +86,12 @@ router.get("/", requireRole("ADMIN", "HR", "TRAINER", "INTERN", "COLLEGE"), asyn
     where: { isActive: true },
     include: {
       trainer: { select: { id: true, fullName: true, email: true } },
+      trainers: { include: { trainer: { select: { id: true, fullName: true, email: true } } } },
       members: {
-        where: { isActive: true },
+        where: { isActive: true, intern: { approvalStatus: "APPROVED" } },
         include: { intern: { include: { user: { select: { id: true, fullName: true, email: true } }, college: true } } },
       },
-      _count: { select: { members: { where: { isActive: true } } } },
+      _count: { select: { members: { where: { isActive: true, intern: { approvalStatus: "APPROVED" } } } } },
     },
     orderBy: { createdAt: "desc" },
   });
@@ -86,6 +103,7 @@ router.post("/", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
     name: z.string().min(2),
     batchLabel: z.string().optional(),
     trainerId: z.string().optional(),
+    trainerIds: z.array(z.string()).optional(),
     startDate: z.string().optional(),
     endDate: z.string().optional(),
     internIds: z.array(z.string()).optional(),
@@ -107,6 +125,23 @@ router.post("/", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
       },
     });
 
+    if (trainerId) {
+      await tx.groupTrainer.upsert({
+        where: { groupId_trainerId: { groupId: g.id, trainerId } },
+        update: {},
+        create: { groupId: g.id, trainerId },
+      });
+    }
+    const extras = (parsed.data.trainerIds || []).filter((id) => id && id !== trainerId);
+    for (const tid of extras) {
+      if (req.user!.role === "TRAINER") continue;
+      await tx.groupTrainer.upsert({
+        where: { groupId_trainerId: { groupId: g.id, trainerId: tid } },
+        update: {},
+        create: { groupId: g.id, trainerId: tid },
+      });
+    }
+
     const internIds = parsed.data.internIds || [];
     for (const internId of internIds) {
       await tx.groupMember.updateMany({
@@ -122,6 +157,7 @@ router.post("/", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
     where: { id: group.id },
     include: {
       trainer: { select: { id: true, fullName: true } },
+      trainers: { include: { trainer: { select: { id: true, fullName: true } } } },
       members: { where: { isActive: true }, include: { intern: { include: { user: true, college: true } } } },
     },
   });
@@ -135,7 +171,7 @@ router.post("/:id/members", requireRole("ADMIN", "HR", "TRAINER"), async (req, r
 
   const group = await prisma.trainingGroup.findUnique({ where: { id: req.params.id } });
   if (!group) return res.status(404).json({ message: "Group not found" });
-  if (req.user!.role === "TRAINER" && group.trainerId !== req.user!.id) {
+  if (req.user!.role === "TRAINER" && !(await trainerOwnsGroup(req.user!.id, group.id))) {
     return res.status(403).json({ message: "Not your group" });
   }
 
@@ -155,7 +191,7 @@ router.post("/:id/members", requireRole("ADMIN", "HR", "TRAINER"), async (req, r
 router.delete("/:id/members/:internId", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
   const group = await prisma.trainingGroup.findUnique({ where: { id: req.params.id } });
   if (!group) return res.status(404).json({ message: "Group not found" });
-  if (req.user!.role === "TRAINER" && group.trainerId !== req.user!.id) {
+  if (req.user!.role === "TRAINER" && !(await trainerOwnsGroup(req.user!.id, group.id))) {
     return res.status(403).json({ message: "Not your group" });
   }
 
@@ -166,11 +202,67 @@ router.delete("/:id/members/:internId", requireRole("ADMIN", "HR", "TRAINER"), a
   res.json({ message: "Member removed" });
 });
 
+router.patch("/:id/complete", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
+  const schema = z.object({
+    internshipStatus: z.enum(["ACTIVE", "COMPLETED"]),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "internshipStatus required" });
+
+  const group = await prisma.trainingGroup.findUnique({ where: { id: req.params.id } });
+  if (!group) return res.status(404).json({ message: "Group not found" });
+  if (req.user!.role === "TRAINER" && !(await trainerOwnsGroup(req.user!.id, group.id))) {
+    return res.status(403).json({ message: "Not your group" });
+  }
+
+  const updated = await prisma.trainingGroup.update({
+    where: { id: group.id },
+    data:
+      parsed.data.internshipStatus === "COMPLETED"
+        ? {
+            internshipStatus: "COMPLETED",
+            completedAt: new Date(),
+            completedById: req.user!.id,
+          }
+        : {
+            internshipStatus: "ACTIVE",
+            completedAt: null,
+            completedById: null,
+          },
+    include: {
+      trainer: { select: { id: true, fullName: true } },
+      completedBy: { select: { fullName: true, role: true } },
+      members: {
+        where: { isActive: true },
+        include: { intern: { include: { user: true, college: true } } },
+      },
+    },
+  });
+
+  // When completing group, optionally mark all active members completed
+  if (parsed.data.internshipStatus === "COMPLETED") {
+    await prisma.internProfile.updateMany({
+      where: {
+        memberships: { some: { groupId: group.id, isActive: true } },
+        internshipStatus: "ACTIVE",
+      },
+      data: {
+        internshipStatus: "COMPLETED",
+        completedAt: new Date(),
+        completedById: req.user!.id,
+      },
+    });
+  }
+
+  res.json({ group: updated });
+});
+
 router.patch("/:id", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
   const schema = z.object({
     name: z.string().min(2).optional(),
     batchLabel: z.string().nullable().optional(),
     trainerId: z.string().nullable().optional(),
+    trainerIds: z.array(z.string()).optional(),
     startDate: z.string().nullable().optional(),
     endDate: z.string().nullable().optional(),
   });
@@ -179,7 +271,7 @@ router.patch("/:id", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => 
 
   const group = await prisma.trainingGroup.findUnique({ where: { id: req.params.id } });
   if (!group) return res.status(404).json({ message: "Group not found" });
-  if (req.user!.role === "TRAINER" && group.trainerId !== req.user!.id) {
+  if (req.user!.role === "TRAINER" && !(await trainerOwnsGroup(req.user!.id, group.id))) {
     return res.status(403).json({ message: "Not your group" });
   }
 
@@ -198,8 +290,26 @@ router.patch("/:id", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => 
         ? { endDate: parsed.data.endDate ? new Date(parsed.data.endDate) : null }
         : {}),
     },
+  });
+
+  if (parsed.data.trainerId !== undefined && req.user!.role !== "TRAINER") {
+    await syncPrimaryGroupTrainer(updated.id, parsed.data.trainerId);
+  }
+  if (parsed.data.trainerIds && (req.user!.role === "ADMIN" || req.user!.role === "HR")) {
+    for (const tid of parsed.data.trainerIds) {
+      await prisma.groupTrainer.upsert({
+        where: { groupId_trainerId: { groupId: updated.id, trainerId: tid } },
+        update: {},
+        create: { groupId: updated.id, trainerId: tid },
+      });
+    }
+  }
+
+  const full = await prisma.trainingGroup.findUnique({
+    where: { id: updated.id },
     include: {
       trainer: { select: { id: true, fullName: true } },
+      trainers: { include: { trainer: { select: { id: true, fullName: true } } } },
       members: {
         where: { isActive: true },
         include: { intern: { include: { user: true, college: true } } },
@@ -207,14 +317,13 @@ router.patch("/:id", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => 
     },
   });
 
-  res.json({ group: updated });
+  res.json({ group: full });
 });
 
-/** Soft-delete group */
 router.delete("/:id", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
   const group = await prisma.trainingGroup.findUnique({ where: { id: req.params.id } });
   if (!group) return res.status(404).json({ message: "Group not found" });
-  if (req.user!.role === "TRAINER" && group.trainerId !== req.user!.id) {
+  if (req.user!.role === "TRAINER" && !(await trainerOwnsGroup(req.user!.id, group.id))) {
     return res.status(403).json({ message: "Not your group" });
   }
 
@@ -228,8 +337,7 @@ router.delete("/:id", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) =>
       data: { isActive: false },
     }),
   ]);
-
-  res.json({ message: "Group deleted" });
+  res.json({ message: "Group archived" });
 });
 
 export default router;

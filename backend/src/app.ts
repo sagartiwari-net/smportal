@@ -10,6 +10,9 @@ import groupsRoutes from "./routes/groups.routes";
 import tasksRoutes from "./routes/tasks.routes";
 import attendanceRoutes from "./routes/attendance.routes";
 import analyticsRoutes from "./routes/analytics.routes";
+import internsRoutes from "./routes/interns.routes";
+import registrationRoutes from "./routes/registration.routes";
+import profileRoutes from "./routes/profile.routes";
 
 export function createApp() {
   const app = express();
@@ -20,7 +23,7 @@ export function createApp() {
       credentials: true,
     }),
   );
-  app.use(express.json({ limit: "2mb" }));
+  app.use(express.json({ limit: "12mb" }));
   app.use(cookieParser());
 
   app.use("/api/health", healthRoutes);
@@ -31,6 +34,9 @@ export function createApp() {
   app.use("/api/tasks", tasksRoutes);
   app.use("/api/attendance", attendanceRoutes);
   app.use("/api/analytics", analyticsRoutes);
+  app.use("/api/interns", internsRoutes);
+  app.use("/api/registration", registrationRoutes);
+  app.use("/api/profile", profileRoutes);
 
   app.use((_req, res) => {
     res.status(404).json({ message: "Not found" });

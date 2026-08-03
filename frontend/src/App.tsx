@@ -16,6 +16,10 @@ import { GroupsPage } from "./pages/shared/GroupsPage";
 import { TasksPage } from "./pages/shared/TasksPage";
 import { AttendancePage } from "./pages/shared/AttendancePage";
 import { AnalyticsPage } from "./pages/shared/AnalyticsPage";
+import { RegistrationsPage } from "./pages/shared/RegistrationsPage";
+import { InviteRegisterPage } from "./pages/shared/InviteRegisterPage";
+import { ProfilePage } from "./pages/shared/ProfilePage";
+import { ProfileChangesPage } from "./pages/shared/ProfileChangesPage";
 
 export default function App() {
   return (
@@ -24,6 +28,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<LandingPage />} />
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/invite/:token" element={<InviteRegisterPage />} />
 
           <Route element={<ProtectedRoute roles={["ADMIN"]} />}>
             <Route element={<DashboardLayout />}>
@@ -34,6 +39,9 @@ export default function App() {
               <Route path="/admin/tasks" element={<TasksPage />} />
               <Route path="/admin/attendance" element={<AttendancePage />} />
               <Route path="/admin/analytics" element={<AnalyticsPage />} />
+              <Route path="/admin/registrations" element={<RegistrationsPage />} />
+              <Route path="/admin/profile" element={<ProfilePage />} />
+              <Route path="/admin/profile-changes" element={<ProfileChangesPage />} />
             </Route>
           </Route>
 
@@ -46,6 +54,9 @@ export default function App() {
               <Route path="/hr/tasks" element={<TasksPage />} />
               <Route path="/hr/attendance" element={<AttendancePage />} />
               <Route path="/hr/analytics" element={<AnalyticsPage />} />
+              <Route path="/hr/registrations" element={<RegistrationsPage />} />
+              <Route path="/hr/profile" element={<ProfilePage />} />
+              <Route path="/hr/profile-changes" element={<ProfileChangesPage />} />
             </Route>
           </Route>
 
@@ -56,6 +67,8 @@ export default function App() {
               <Route path="/trainer/tasks" element={<TasksPage />} />
               <Route path="/trainer/attendance" element={<AttendancePage />} />
               <Route path="/trainer/analytics" element={<AnalyticsPage />} />
+              <Route path="/trainer/profile" element={<ProfilePage />} />
+              <Route path="/trainer/profile-changes" element={<ProfileChangesPage />} />
             </Route>
           </Route>
 
@@ -65,6 +78,7 @@ export default function App() {
               <Route path="/intern/performance" element={<InternPerformancePage />} />
               <Route path="/intern/tasks" element={<TasksPage />} />
               <Route path="/intern/attendance" element={<AttendancePage />} />
+              <Route path="/intern/profile" element={<ProfilePage />} />
             </Route>
           </Route>
 
@@ -75,6 +89,8 @@ export default function App() {
               <Route path="/college/tasks" element={<TasksPage />} />
               <Route path="/college/attendance" element={<AttendancePage />} />
               <Route path="/college/analytics" element={<AnalyticsPage />} />
+              <Route path="/college/profile" element={<ProfilePage />} />
+              <Route path="/college/profile-changes" element={<ProfileChangesPage />} />
             </Route>
           </Route>
 

@@ -2,12 +2,40 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { getTrainerGroupIds } from "../services/trainerScope";
 
 const router = Router();
 
 router.use(requireAuth);
 
-router.get("/", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async (_req, res) => {
+router.get("/", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async (req, res) => {
+  const role = req.user!.role;
+
+  if (role === "TRAINER") {
+    const groupIds = await getTrainerGroupIds(req.user!.id);
+    if (!groupIds.length) return res.json({ colleges: [] });
+    const colleges = await prisma.college.findMany({
+      where: {
+        interns: {
+          some: {
+            memberships: { some: { isActive: true, groupId: { in: groupIds } } },
+          },
+        },
+      },
+      orderBy: { name: "asc" },
+    });
+    return res.json({ colleges });
+  }
+
+  if (role === "COLLEGE") {
+    const profile = await prisma.collegeProfile.findUnique({ where: { userId: req.user!.id } });
+    const colleges = await prisma.college.findMany({
+      where: { id: profile?.collegeId || "" },
+      orderBy: { name: "asc" },
+    });
+    return res.json({ colleges });
+  }
+
   const colleges = await prisma.college.findMany({ orderBy: { name: "asc" } });
   res.json({ colleges });
 });

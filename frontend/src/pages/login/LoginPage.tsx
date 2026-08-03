@@ -1,20 +1,27 @@
 import { useState, type FormEvent } from "react";
-import { Link, Navigate, useNavigate } from "react-router-dom";
+import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { Eye, EyeOff, Lock, Mail } from "lucide-react";
 import { useAuth } from "../../auth/AuthContext";
-import { ROLE_HOME } from "../../lib/roles";
+import { ROLE_HOME, type Role } from "../../lib/roles";
 
 export function LoginPage() {
   const { user, loading, login } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const next = searchParams.get("next") || "";
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  function homeFor(role: Role) {
+    if (next.startsWith("/")) return next;
+    return ROLE_HOME[role];
+  }
+
   if (!loading && user) {
-    return <Navigate to={ROLE_HOME[user.role]} replace />;
+    return <Navigate to={homeFor(user.role)} replace />;
   }
 
   async function onSubmit(e: FormEvent) {
@@ -23,9 +30,13 @@ export function LoginPage() {
     setSubmitting(true);
     try {
       const loggedIn = await login(email, password);
-      navigate(ROLE_HOME[loggedIn.role], { replace: true });
-    } catch {
-      setError("Invalid email or password");
+      navigate(homeFor(loggedIn.role), { replace: true });
+    } catch (ex: unknown) {
+      const m =
+        ex && typeof ex === "object" && "response" in ex
+          ? (ex as { response?: { data?: { message?: string } } }).response?.data?.message
+          : null;
+      setError(m || "Invalid email or password");
     } finally {
       setSubmitting(false);
     }

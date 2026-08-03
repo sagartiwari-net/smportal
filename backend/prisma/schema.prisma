@@ -30,6 +30,30 @@ enum AttendanceStatus {
   WEEK_OFF
 }
 
+enum InternshipStatus {
+  ACTIVE
+  COMPLETED
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum InviteStatus {
+  ACTIVE
+  USED
+  REVOKED
+  EXPIRED
+}
+
+enum ChangeRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
@@ -45,11 +69,56 @@ model User {
   collegeProfile CollegeProfile?
 
   trainedGroups TrainingGroup[] @relation("GroupTrainer")
+  groupTrainerLinks GroupTrainer[] @relation("GroupTrainerLink")
   createdTasks  Task[]          @relation("TaskCreator")
   feedbacks     Feedback[]
   markedAttendance Attendance[] @relation("AttendanceMarker")
+  completedInterns InternProfile[] @relation("InternCompletedBy")
+  hiredInterns     InternProfile[] @relation("InternHiredBy")
+  completedGroups  TrainingGroup[] @relation("GroupCompletedBy")
+  createdInvites   RegistrationInvite[] @relation("InviteCreator")
+  boundInvites     RegistrationInvite[] @relation("InviteBoundUser")
+  registeredInterns InternProfile[] @relation("InternRegisteredBy")
+  approvedInterns   InternProfile[] @relation("InternApprovedBy")
+
+  profileChangeTargets   ProfileChangeRequest[] @relation("ProfileChangeTarget")
+  profileChangeRequests  ProfileChangeRequest[] @relation("ProfileChangeRequester")
+  profileChangeReviews   ProfileChangeRequest[] @relation("ProfileChangeReviewer")
 
   @@index([role])
+}
+
+/// College-requested (or audited) intern profile field changes
+model ProfileChangeRequest {
+  id             String              @id @default(cuid())
+  targetUserId   String
+  requestedById  String
+  status         ChangeRequestStatus @default(PENDING)
+
+  proposedFullName String?
+  proposedEmail    String?
+  proposedPhone    String?
+  proposedAddress  String?           @db.Text
+
+  previousFullName String?
+  previousEmail    String?
+  previousPhone    String?
+  previousAddress  String?           @db.Text
+
+  reviewedById String?
+  reviewedAt   DateTime?
+  note         String?             @db.Text
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  targetUser  User  @relation("ProfileChangeTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+  requestedBy User  @relation("ProfileChangeRequester", fields: [requestedById], references: [id])
+  reviewedBy  User? @relation("ProfileChangeReviewer", fields: [reviewedById], references: [id])
+
+  @@index([status])
+  @@index([targetUserId])
+  @@index([requestedById])
+  @@index([createdAt])
 }
 
 model College {
@@ -61,22 +130,50 @@ model College {
 
   interns  InternProfile[]
   profiles CollegeProfile[]
+  invites  RegistrationInvite[]
 }
 
 model InternProfile {
   id        String   @id @default(cuid())
   userId    String   @unique
   phone     String?
+  address   String?  @db.Text
   collegeId String?
   joinedAt  DateTime @default(now())
 
+  internshipStatus InternshipStatus @default(ACTIVE)
+  approvalStatus   ApprovalStatus   @default(APPROVED)
+  completedAt      DateTime?
+  completedById    String?
+  isHired          Boolean   @default(false)
+  hiredAt          DateTime?
+  hiredById        String?
+  hireNote         String?
+
+  inviteId       String?
+  registeredById String?
+  approvedById   String?
+  approvedAt     DateTime?
+  expiresAt      DateTime?
+  rejectNote     String?
+
   user         User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   college      College?        @relation(fields: [collegeId], references: [id])
+  completedBy  User?           @relation("InternCompletedBy", fields: [completedById], references: [id])
+  hiredBy      User?           @relation("InternHiredBy", fields: [hiredById], references: [id])
+  invite       RegistrationInvite? @relation(fields: [inviteId], references: [id])
+  registeredBy User?           @relation("InternRegisteredBy", fields: [registeredById], references: [id])
+  approvedBy   User?           @relation("InternApprovedBy", fields: [approvedById], references: [id])
   memberships  GroupMember[]
   assignments  TaskAssignment[]
   attendance   Attendance[]
 
   @@index([collegeId])
+  @@index([internshipStatus])
+  @@index([approvalStatus])
+  @@index([isHired])
+  @@index([inviteId])
+  @@index([expiresAt])
 }
 
 model TrainerProfile {
@@ -99,6 +196,35 @@ model CollegeProfile {
   @@index([collegeId])
 }
 
+/// One-time / limited registration campaign for a college teacher
+model RegistrationInvite {
+  id                String       @id @default(cuid())
+  tokenHash         String       @unique
+  collegeId         String
+  groupId           String
+  createdById       String
+  /// If set, only this COLLEGE user may use the link
+  boundUserId       String?
+  maxRegistrations  Int?
+  usedCount         Int          @default(0)
+  expiresAt         DateTime
+  status            InviteStatus @default(ACTIVE)
+  note              String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  college   College       @relation(fields: [collegeId], references: [id])
+  group     TrainingGroup @relation(fields: [groupId], references: [id])
+  createdBy User          @relation("InviteCreator", fields: [createdById], references: [id])
+  boundUser User?         @relation("InviteBoundUser", fields: [boundUserId], references: [id])
+  interns   InternProfile[]
+
+  @@index([collegeId])
+  @@index([groupId])
+  @@index([status])
+  @@index([createdById])
+}
+
 model TrainingGroup {
   id        String    @id @default(cuid())
   name      String
@@ -107,14 +233,36 @@ model TrainingGroup {
   startDate DateTime?
   endDate   DateTime?
   isActive  Boolean   @default(true)
+  internshipStatus InternshipStatus @default(ACTIVE)
+  completedAt      DateTime?
+  completedById    String?
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
   trainer User?         @relation("GroupTrainer", fields: [trainerId], references: [id])
+  completedBy User?     @relation("GroupCompletedBy", fields: [completedById], references: [id])
+  trainers GroupTrainer[]
   members GroupMember[]
   tasks   Task[]
+  invites RegistrationInvite[]
 
   @@index([trainerId])
+  @@index([internshipStatus])
+}
+
+/// Extra / co-trainers on a group (primary trainerId still used; both can see same group tasks)
+model GroupTrainer {
+  id        String   @id @default(cuid())
+  groupId   String
+  trainerId String
+  createdAt DateTime @default(now())
+
+  group   TrainingGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  trainer User          @relation("GroupTrainerLink", fields: [trainerId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, trainerId])
+  @@index([trainerId])
+  @@index([groupId])
 }
 
 model GroupMember {
@@ -172,8 +320,10 @@ model TaskAssignment {
 
   @@unique([taskId, internId])
   @@index([internId])
+  @@index([taskId])
   @@index([internId, forDate])
   @@index([status])
+  @@index([taskId, status])
 }
 
 model Submission {
@@ -201,6 +351,8 @@ model Feedback {
   reviewer   User       @relation(fields: [reviewerId], references: [id])
 
   @@index([submissionId])
+  @@index([reviewerId])
+  @@index([reviewerId, createdAt])
 }
 
 model Attendance {

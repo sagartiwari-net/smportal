@@ -4,6 +4,7 @@ import { Role } from "../generated/prisma/client";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { hashPassword } from "../utils/password";
+import { getTrainerGroupIds } from "../services/trainerScope";
 
 const router = Router();
 router.use(requireAuth);
@@ -33,6 +34,35 @@ router.get("/", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
   if (req.user!.role === "HR" && role === "ADMIN") {
     return res.status(403).json({ message: "Forbidden" });
   }
+
+  // Trainer: only interns in their assigned groups
+  if (req.user!.role === "TRAINER") {
+    const groupIds = await getTrainerGroupIds(req.user!.id);
+    if (!groupIds.length) return res.json({ users: [] });
+    const users = await prisma.user.findMany({
+      where: {
+        isActive: true,
+        role: Role.INTERN,
+        internProfile: {
+          approvalStatus: "APPROVED",
+          memberships: { some: { isActive: true, groupId: { in: groupIds } } },
+        },
+      },
+      select: {
+        id: true,
+        email: true,
+        fullName: true,
+        role: true,
+        createdAt: true,
+        internProfile: { include: { college: true } },
+        trainerProfile: true,
+        collegeProfile: { include: { college: true } },
+      },
+      orderBy: { fullName: "asc" },
+    });
+    return res.json({ users });
+  }
+
   const users = await prisma.user.findMany({
     where: {
       isActive: true,
@@ -79,7 +109,10 @@ router.post("/", requireRole(...MANAGE_ROLES), async (req, res) => {
   }
 
   if ((role === "INTERN" || role === "COLLEGE") && !collegeId) {
-    return res.status(400).json({ message: "collegeId required for INTERN and COLLEGE" });
+    if (role === "COLLEGE") {
+      return res.status(400).json({ message: "collegeId required for COLLEGE" });
+    }
+    // INTERN may be direct company hire without college
   }
 
   const exists = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
@@ -99,7 +132,18 @@ router.post("/", requireRole(...MANAGE_ROLES), async (req, res) => {
 
     if (role === "INTERN") {
       await tx.internProfile.create({
-        data: { userId: created.id, phone: phone || null, collegeId: collegeId! },
+        data: {
+          userId: created.id,
+          phone: phone || null,
+          collegeId: collegeId || null,
+          approvalStatus: "APPROVED",
+          approvedById: req.user!.id,
+          approvedAt: new Date(),
+          isHired: !collegeId,
+          hiredAt: !collegeId ? new Date() : null,
+          hiredById: !collegeId ? req.user!.id : null,
+          hireNote: !collegeId ? "Created without college (direct)" : null,
+        },
       });
     } else if (role === "TRAINER") {
       await tx.trainerProfile.create({ data: { userId: created.id, phone: phone || null } });
@@ -123,6 +167,7 @@ router.patch("/:id", requireRole(...MANAGE_ROLES), async (req, res) => {
     email: z.string().email().optional(),
     password: z.string().min(6).optional(),
     phone: z.string().optional().nullable(),
+    address: z.string().optional().nullable(),
     collegeId: z.string().optional().nullable(),
     isActive: z.boolean().optional(),
   });
@@ -139,6 +184,17 @@ router.patch("/:id", requireRole(...MANAGE_ROLES), async (req, res) => {
     return res.status(403).json({ message: "You cannot edit this user" });
   }
 
+  if (
+    target.role === "INTERN" &&
+    target.internProfile?.internshipStatus === "COMPLETED" &&
+    req.user!.role !== "ADMIN" &&
+    req.user!.role !== "HR"
+  ) {
+    return res.status(403).json({
+      message: "Completed internship details can only be changed by Admin or HR",
+    });
+  }
+
   const data: { fullName?: string; email?: string; passwordHash?: string } = {};
   if (parsed.data.fullName) data.fullName = parsed.data.fullName.trim();
   if (parsed.data.email) data.email = parsed.data.email.toLowerCase().trim();
@@ -153,6 +209,7 @@ router.patch("/:id", requireRole(...MANAGE_ROLES), async (req, res) => {
           where: { userId: target.id },
           data: {
             ...(parsed.data.phone !== undefined ? { phone: parsed.data.phone } : {}),
+            ...(parsed.data.address !== undefined ? { address: parsed.data.address } : {}),
             ...(parsed.data.collegeId !== undefined ? { collegeId: parsed.data.collegeId } : {}),
           },
         });

@@ -2,28 +2,45 @@ import { Router } from "express";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { computeInternPerformance } from "../services/performance";
+import {
+  buildAnalyticsDayExcel,
+  buildFullAnalyticsExcel,
+  buildFullAnalyticsPrintPayload,
+  type FullAnalyticsPayload,
+} from "../services/analyticsExcelExport";
+import { buildInternExcelWorkbook } from "../services/internExcelExport";
 
 const router = Router();
 router.use(requireAuth);
+
+function dayUtc(input: string) {
+  const d = new Date(input);
+  return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+}
 
 const TABS = ["overview", "tasks", "attendance", "colleges", "leaderboard"] as const;
 type Tab = (typeof TABS)[number];
 
 async function scopedInterns(userId: string, role: string) {
+  const approved = { approvalStatus: "APPROVED" as const };
   if (role === "COLLEGE") {
     const profile = await prisma.collegeProfile.findUnique({ where: { userId } });
     return prisma.internProfile.findMany({
-      where: { collegeId: profile?.collegeId || "" },
+      where: { collegeId: profile?.collegeId || "", ...approved },
       include: { user: { select: { id: true, fullName: true, email: true } }, college: true },
     });
   }
   if (role === "TRAINER") {
     return prisma.internProfile.findMany({
-      where: { memberships: { some: { isActive: true, group: { trainerId: userId } } } },
+      where: {
+        ...approved,
+        memberships: { some: { isActive: true, group: { trainerId: userId } } },
+      },
       include: { user: { select: { id: true, fullName: true, email: true } }, college: true },
     });
   }
   return prisma.internProfile.findMany({
+    where: approved,
     include: { user: { select: { id: true, fullName: true, email: true } }, college: true },
   });
 }
@@ -166,6 +183,221 @@ function summaryFromRows(rows: Row[], extra?: { totalAssignments?: number; total
   };
 }
 
+/** Full DB-backed analytics payload — all sheets for Excel / print */
+async function gatherFullAnalyticsPayload(
+  sorted: Row[],
+  filters: ReturnType<typeof parseFilters>,
+): Promise<FullAnalyticsPayload> {
+  const internIds = sorted.map((r) => r.internId);
+  const rowById = new Map(sorted.map((r) => [r.internId, r]));
+  const dateWhere = dateFilterFrom(filters);
+
+  const [assignments, attendance] = await Promise.all([
+    internIds.length
+      ? prisma.taskAssignment.findMany({
+          where: {
+            internId: { in: internIds },
+            ...(dateWhere ? { forDate: dateWhere } : {}),
+          },
+          include: {
+            task: { select: { title: true } },
+            intern: {
+              include: {
+                user: { select: { fullName: true, email: true } },
+                college: { select: { name: true } },
+              },
+            },
+          },
+          orderBy: [{ forDate: "desc" }, { dayNumber: "asc" }, { taskNumber: "asc" }],
+        })
+      : Promise.resolve([]),
+    internIds.length
+      ? prisma.attendance.findMany({
+          where: {
+            internId: { in: internIds },
+            ...(dateWhere ? { date: dateWhere } : {}),
+          },
+          include: {
+            intern: {
+              include: {
+                user: { select: { fullName: true, email: true } },
+                college: { select: { name: true } },
+              },
+            },
+            markedBy: { select: { fullName: true, role: true } },
+          },
+          orderBy: [{ date: "desc" }, { updatedAt: "desc" }],
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const taskStatus = { ASSIGNED: 0, SUBMITTED: 0, NEEDS_IMPROVEMENT: 0, DONE: 0 };
+  for (const a of assignments) taskStatus[a.status] += 1;
+
+  const attendanceCounts = { PRESENT: 0, ABSENT: 0, LEAVE: 0, WEEK_OFF: 0 };
+  const dayMap = new Map<
+    string,
+    { date: string; present: number; absent: number; leave: number; weekOff: number; total: number }
+  >();
+
+  const attendanceDetails = attendance.map((r) => {
+    const key = r.date.toISOString().slice(0, 10);
+    const d = dayMap.get(key) || {
+      date: key,
+      present: 0,
+      absent: 0,
+      leave: 0,
+      weekOff: 0,
+      total: 0,
+    };
+    d.total += 1;
+    if (r.status === "PRESENT") {
+      d.present += 1;
+      attendanceCounts.PRESENT += 1;
+    } else if (r.status === "ABSENT") {
+      d.absent += 1;
+      attendanceCounts.ABSENT += 1;
+    } else if (r.status === "LEAVE") {
+      d.leave += 1;
+      attendanceCounts.LEAVE += 1;
+    } else if (r.status === "WEEK_OFF") {
+      d.weekOff += 1;
+      attendanceCounts.WEEK_OFF += 1;
+    }
+    dayMap.set(key, d);
+    const perf = rowById.get(r.internId);
+    return {
+      date: key,
+      student: r.intern.user.fullName,
+      email: r.intern.user.email,
+      college: perf?.college || r.intern.college?.name || "—",
+      group: perf?.groupName || "—",
+      status: String(r.status),
+      markedBy: r.markedBy
+        ? `${r.markedBy.fullName}${r.markedBy.role ? ` (${r.markedBy.role})` : ""}`
+        : "—",
+    };
+  });
+
+  const attendanceDays = [...dayMap.values()]
+    .map((d) => {
+      const counted = d.present + d.absent + d.leave;
+      return {
+        ...d,
+        presentPct: counted ? Math.round((d.present / counted) * 100) : 0,
+      };
+    })
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  const byCollegeMap = new Map<
+    string,
+    { n: number; scores: number[]; att: number[]; tasks: number[]; done: number; total: number }
+  >();
+  const byGroupMap = new Map<
+    string,
+    { n: number; scores: number[]; att: number[]; tasks: number[]; done: number; total: number }
+  >();
+  for (const r of sorted) {
+    const c = byCollegeMap.get(r.college) || { n: 0, scores: [], att: [], tasks: [], done: 0, total: 0 };
+    c.n += 1;
+    c.scores.push(r.score);
+    c.att.push(r.attendanceRate);
+    c.tasks.push(r.taskCompletionRate);
+    c.done += r.doneTasks;
+    c.total += r.totalTasks;
+    byCollegeMap.set(r.college, c);
+
+    const g = byGroupMap.get(r.groupName) || { n: 0, scores: [], att: [], tasks: [], done: 0, total: 0 };
+    g.n += 1;
+    g.scores.push(r.score);
+    g.att.push(r.attendanceRate);
+    g.tasks.push(r.taskCompletionRate);
+    g.done += r.doneTasks;
+    g.total += r.totalTasks;
+    byGroupMap.set(r.groupName, g);
+  }
+
+  const avg = (arr: number[]) => (arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0);
+
+  const filterLabel = [
+    "Full analytics report",
+    filters.college !== "all" ? `College: ${filters.college}` : null,
+    filters.group !== "all" ? `Group: ${filters.group}` : null,
+    filters.from || filters.to ? `Dates: ${filters.from || "…"} → ${filters.to || "…"}` : null,
+    filters.search ? `Search: ${filters.search}` : null,
+    `${sorted.length} students`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return {
+    filterLabel,
+    summary: {
+      students: sorted.length,
+      avgScore: avg(sorted.map((r) => r.score)),
+      avgAttendance: avg(sorted.map((r) => r.attendanceRate)),
+      avgTasks: avg(sorted.map((r) => r.taskCompletionRate)),
+      totalAssignments: assignments.length,
+      totalAttendanceRows: attendance.length,
+    },
+    taskStatus,
+    attendanceCounts,
+    students: sorted.map((r, i) => ({
+      rank: i + 1,
+      fullName: r.fullName,
+      email: r.email,
+      college: r.college,
+      groupName: r.groupName,
+      score: r.score,
+      attendanceRate: r.attendanceRate,
+      taskCompletionRate: r.taskCompletionRate,
+      doneTasks: r.doneTasks,
+      totalTasks: r.totalTasks,
+      present: r.present,
+      absent: r.absent,
+      leave: r.leave,
+    })),
+    tasks: assignments.map((a) => {
+      const perf = rowById.get(a.internId);
+      return {
+        student: a.intern.user.fullName,
+        email: a.intern.user.email,
+        college: perf?.college || a.intern.college?.name || "—",
+        group: perf?.groupName || "—",
+        day: a.dayNumber,
+        taskNo: a.taskNumber,
+        title: a.task.title,
+        forDate: a.forDate.toISOString().slice(0, 10),
+        status: String(a.status),
+      };
+    }),
+    attendanceDays,
+    attendanceDetails,
+    colleges: [...byCollegeMap.entries()]
+      .map(([name, v]) => ({
+        name,
+        students: v.n,
+        avgScore: avg(v.scores),
+        avgAttendance: avg(v.att),
+        avgTasks: avg(v.tasks),
+        tasksDone: v.done,
+        tasksTotal: v.total,
+      }))
+      .sort((a, b) => b.students - a.students),
+    groups: [...byGroupMap.entries()]
+      .map(([name, v]) => ({
+        name,
+        students: v.n,
+        avgScore: avg(v.scores),
+        avgAttendance: avg(v.att),
+        avgTasks: avg(v.tasks),
+        tasksDone: v.done,
+        tasksTotal: v.total,
+      }))
+      .sort((a, b) => b.students - a.students),
+  };
+}
+
 /** Lightweight filter dropdown options (no heavy performance calc) */
 router.get("/filter-options", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async (req, res) => {
   const interns = await scopedInterns(req.user!.id, req.user!.role);
@@ -224,6 +456,7 @@ router.get("/dashboard", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async
       ...base,
       charts: {
         topInterns: rows.slice(0, 10).map((r) => ({
+          internId: r.internId,
           name: r.fullName.split(" ")[0],
           fullName: r.fullName,
           score: r.score,
@@ -442,6 +675,7 @@ router.get("/detail", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async (r
     }));
 
   const recentWork = assignments.slice(0, 40).map((a) => ({
+    internId: a.internId,
     internName: a.intern.user.fullName,
     email: a.intern.user.email,
     title: a.task.title,
@@ -450,6 +684,69 @@ router.get("/detail", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async (r
     status: a.status,
     forDate: a.forDate,
   }));
+
+  // Related groups (for college) / colleges (for group) — clickable drill targets
+  let relatedGroups: {
+    name: string;
+    students: number;
+    avgScore: number;
+    avgAttendance: number;
+    avgTasks: number;
+  }[] = [];
+  let relatedColleges: {
+    name: string;
+    students: number;
+    avgScore: number;
+    avgAttendance: number;
+    avgTasks: number;
+  }[] = [];
+
+  if (internIds.length) {
+    if (type === "college") {
+      const memberships = await prisma.groupMember.findMany({
+        where: { internId: { in: internIds }, isActive: true },
+        include: { group: { select: { name: true } } },
+      });
+      const byGroup = new Map<string, Set<string>>();
+      for (const m of memberships) {
+        const gName = m.group.name || "Unassigned";
+        if (!byGroup.has(gName)) byGroup.set(gName, new Set());
+        byGroup.get(gName)!.add(m.internId);
+      }
+      relatedGroups = [...byGroup.entries()]
+        .map(([gName, idSet]) => {
+          const subset = sorted.filter((r) => idSet.has(r.internId));
+          const n = subset.length || 1;
+          return {
+            name: gName,
+            students: subset.length,
+            avgScore: Math.round(subset.reduce((s, r) => s + r.score, 0) / n),
+            avgAttendance: Math.round(subset.reduce((s, r) => s + r.attendanceRate, 0) / n),
+            avgTasks: Math.round(subset.reduce((s, r) => s + r.taskCompletionRate, 0) / n),
+          };
+        })
+        .sort((a, b) => b.students - a.students);
+    } else {
+      const byCollege = new Map<string, Row[]>();
+      for (const r of sorted) {
+        const cName = r.college || "Unassigned";
+        if (!byCollege.has(cName)) byCollege.set(cName, []);
+        byCollege.get(cName)!.push(r);
+      }
+      relatedColleges = [...byCollege.entries()]
+        .map(([cName, subset]) => {
+          const n = subset.length || 1;
+          return {
+            name: cName,
+            students: subset.length,
+            avgScore: Math.round(subset.reduce((s, r) => s + r.score, 0) / n),
+            avgAttendance: Math.round(subset.reduce((s, r) => s + r.attendanceRate, 0) / n),
+            avgTasks: Math.round(subset.reduce((s, r) => s + r.taskCompletionRate, 0) / n),
+          };
+        })
+        .sort((a, b) => b.students - a.students);
+    }
+  }
 
   res.json({
     type,
@@ -484,8 +781,242 @@ router.get("/detail", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async (r
           : { done: 0, submitted: 0, needsImprovement: 0, assigned: 0, recentTitles: [] },
       };
     }),
+    relatedGroups,
+    relatedColleges,
     recentWork,
   });
+});
+
+/**
+ * Day roster under analytics filters — click a date from Attendance tab.
+ */
+router.get("/day", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async (req, res) => {
+  const dateStr = typeof req.query.date === "string" ? req.query.date : "";
+  if (!dateStr) return res.status(400).json({ message: "date is required (YYYY-MM-DD)" });
+
+  const filters = parseFilters(req.query as Record<string, unknown>);
+  const interns = await scopedInterns(req.user!.id, req.user!.role);
+  let rows = await buildRows(interns);
+  rows = applyRowFilters(rows, filters);
+  const internIds = rows.map((r) => r.internId);
+  const rowById = new Map(rows.map((r) => [r.internId, r]));
+
+  if (!internIds.length) {
+    return res.json({
+      date: dateStr,
+      counts: { PRESENT: 0, ABSENT: 0, LEAVE: 0, WEEK_OFF: 0 },
+      records: [],
+      filterSummary: summaryFromRows([]),
+    });
+  }
+
+  const date = dayUtc(dateStr);
+  const records = await prisma.attendance.findMany({
+    where: { date, internId: { in: internIds } },
+    include: {
+      intern: {
+        include: {
+          user: { select: { fullName: true, email: true } },
+          college: { select: { name: true } },
+        },
+      },
+      markedBy: { select: { fullName: true, role: true } },
+    },
+    orderBy: { updatedAt: "desc" },
+  });
+
+  const mapped = records.map((r) => {
+    const perf = rowById.get(r.internId);
+    return {
+      id: r.id,
+      internId: r.internId,
+      status: r.status,
+      student: r.intern.user.fullName,
+      email: r.intern.user.email,
+      college: perf?.college || r.intern.college?.name || "Unassigned",
+      groupName: perf?.groupName || "Unassigned",
+      markedBy: r.markedBy
+        ? `${r.markedBy.fullName}${r.markedBy.role ? ` (${r.markedBy.role})` : ""}`
+        : "—",
+      score: perf?.score ?? null,
+      attendanceRate: perf?.attendanceRate ?? null,
+    };
+  });
+
+  const counts = {
+    PRESENT: mapped.filter((r) => r.status === "PRESENT").length,
+    ABSENT: mapped.filter((r) => r.status === "ABSENT").length,
+    LEAVE: mapped.filter((r) => r.status === "LEAVE").length,
+    WEEK_OFF: mapped.filter((r) => r.status === "WEEK_OFF").length,
+  };
+
+  res.json({
+    date: dateStr,
+    counts,
+    records: mapped,
+    filterSummary: summaryFromRows(rows),
+  });
+});
+
+/**
+ * Excel export for analytics views.
+ * type=full|overview|tasks|attendance|colleges|leaderboard → full multi-sheet workbook
+ * type=college|group|day|intern → scoped drill export
+ */
+router.get("/export", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async (req, res) => {
+  const type = typeof req.query.type === "string" ? req.query.type : "full";
+  const filters = parseFilters(req.query as Record<string, unknown>);
+  const name = typeof req.query.name === "string" ? req.query.name : "";
+  const dateStr = typeof req.query.date === "string" ? req.query.date : "";
+  const internId = typeof req.query.internId === "string" ? req.query.internId : "";
+
+  try {
+    if (type === "intern") {
+      if (!internId) return res.status(400).json({ message: "internId required" });
+      if (req.user!.role === "TRAINER") {
+        const ok = await prisma.groupMember.findFirst({
+          where: {
+            internId,
+            isActive: true,
+            group: { trainerId: req.user!.id },
+          },
+        });
+        if (!ok) return res.status(403).json({ message: "Not your intern" });
+      }
+      if (req.user!.role === "COLLEGE") {
+        const profile = await prisma.collegeProfile.findUnique({ where: { userId: req.user!.id } });
+        const intern = await prisma.internProfile.findUnique({
+          where: { id: internId },
+          select: { collegeId: true },
+        });
+        if (!intern || intern.collegeId !== profile?.collegeId) {
+          return res.status(403).json({ message: "Not your college intern" });
+        }
+      }
+      const { buffer, filename } = await buildInternExcelWorkbook(internId);
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      return res.send(buffer);
+    }
+
+    const interns = await scopedInterns(req.user!.id, req.user!.role);
+    let rows = await buildRows(interns);
+    rows = applyRowFilters(rows, filters);
+
+    if (type === "college" || type === "group") {
+      if (!name) return res.status(400).json({ message: "name required" });
+      rows = rows.filter((r) => (type === "college" ? r.college === name : r.groupName === name));
+    }
+
+    const internIds = rows.map((r) => r.internId);
+    const sorted = sortRows(rows, filters.sort || "score_desc");
+
+    if (type === "day") {
+      if (!dateStr) return res.status(400).json({ message: "date required" });
+      const date = dayUtc(dateStr);
+      const records = internIds.length
+        ? await prisma.attendance.findMany({
+            where: { date, internId: { in: internIds } },
+            include: {
+              intern: {
+                include: {
+                  user: { select: { fullName: true, email: true } },
+                  college: { select: { name: true } },
+                },
+              },
+              markedBy: { select: { fullName: true, role: true } },
+            },
+          })
+        : [];
+      const rowById = new Map(rows.map((r) => [r.internId, r]));
+      const mapped = records.map((r) => {
+        const perf = rowById.get(r.internId);
+        return {
+          student: r.intern.user.fullName,
+          email: r.intern.user.email,
+          group: perf?.groupName || "—",
+          college: perf?.college || r.intern.college?.name || "—",
+          status: String(r.status),
+          markedBy: r.markedBy
+            ? `${r.markedBy.fullName}${r.markedBy.role ? ` (${r.markedBy.role})` : ""}`
+            : "—",
+        };
+      });
+      const counts = {
+        PRESENT: mapped.filter((r) => r.status === "PRESENT").length,
+        ABSENT: mapped.filter((r) => r.status === "ABSENT").length,
+        LEAVE: mapped.filter((r) => r.status === "LEAVE").length,
+        WEEK_OFF: mapped.filter((r) => r.status === "WEEK_OFF").length,
+      };
+      const filterBits = [
+        filters.college !== "all" ? `College: ${filters.college}` : null,
+        filters.group !== "all" ? `Group: ${filters.group}` : null,
+      ].filter(Boolean);
+      const { buffer, filename } = await buildAnalyticsDayExcel({
+        date: dateStr,
+        filterLabel: filterBits.join(" · ") || "All scoped students",
+        counts,
+        rows: mapped,
+      });
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      return res.send(buffer);
+    }
+
+    // Full multi-sheet report (default for main Analytics export + college/group drills)
+    const fullTypes = new Set(["full", "overview", "tasks", "attendance", "colleges", "leaderboard", "college", "group"]);
+    if (fullTypes.has(type)) {
+      const payload = await gatherFullAnalyticsPayload(sorted, filters);
+      if (type === "college" || type === "group") {
+        payload.filterLabel = [
+          type === "college" ? `College: ${name}` : `Group: ${name}`,
+          `${payload.summary.students} students`,
+        ].join(" · ");
+      }
+      const { buffer, filename } = await buildFullAnalyticsExcel(payload);
+      const outName =
+        type === "college" || type === "group"
+          ? `analytics-${type}-${name.replace(/\W+/g, "_").slice(0, 40)}.xlsx`
+          : filename;
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${outName}"`);
+      return res.send(buffer);
+    }
+
+    return res.status(400).json({ message: "Unknown export type" });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ message: "Export failed" });
+  }
+});
+
+/**
+ * Print-ready full analytics report (JSON + chart images as base64).
+ * Same data depth as full Excel export.
+ */
+router.get("/report", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async (req, res) => {
+  try {
+    const filters = parseFilters(req.query as Record<string, unknown>);
+    const name = typeof req.query.name === "string" ? req.query.name : "";
+    const type = typeof req.query.type === "string" ? req.query.type : "full";
+
+    const interns = await scopedInterns(req.user!.id, req.user!.role);
+    let rows = await buildRows(interns);
+    rows = applyRowFilters(rows, filters);
+    if (type === "college" || type === "group") {
+      if (!name) return res.status(400).json({ message: "name required" });
+      rows = rows.filter((r) => (type === "college" ? r.college === name : r.groupName === name));
+    }
+    const sorted = sortRows(rows, filters.sort || "score_desc");
+    const payload = await gatherFullAnalyticsPayload(sorted, filters);
+    if (type === "college" || type === "group") {
+      payload.filterLabel = `${type === "college" ? "College" : "Group"}: ${name} · ${payload.filterLabel}`;
+    }
+    return res.json(buildFullAnalyticsPrintPayload(payload));
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ message: "Report failed" });
+  }
 });
 
 router.get("/me", requireRole("INTERN"), async (req, res) => {

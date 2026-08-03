@@ -2,7 +2,10 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNo
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
 import { api } from "../../api/client";
+import { downloadExcel } from "../../api/downloadExcel";
 import { PageHeader } from "../../components/ui/PageHeader";
+import { openAnalyticsPrintReport } from "../../lib/printAnalyticsReport";
+import { AnalyticsDrillPanel, type DrillFrame } from "./analytics/AnalyticsDrillPanel";
 
 type TabId = "overview" | "tasks" | "attendance" | "colleges" | "leaderboard";
 
@@ -43,44 +46,8 @@ type TabPayload = {
     attendanceTrend?: { date: string; rate: number; present: number; absent: number; leave: number; total: number }[];
     byCollege?: { name: string; count: number; avgScore: number; avgAttendance: number; avgTasks: number }[];
     byGroup?: { name: string; count: number; avgScore: number; tasksDone: number; tasksTotal: number }[];
-    topInterns?: { name: string; fullName: string; score: number; attendance: number; tasks: number }[];
+    topInterns?: { internId?: string; name: string; fullName: string; score: number; attendance: number; tasks: number }[];
   };
-};
-
-type DetailPayload = {
-  type: "college" | "group";
-  name: string;
-  summary: {
-    count: number;
-    avgScore: number;
-    avgAttendance: number;
-    avgTasks: number;
-    totalAssignments: number;
-    totalAttendanceRows: number;
-  };
-  charts: {
-    taskStatus: Record<string, number>;
-    attendanceTrend: { date: string; rate: number; present: number; total: number }[];
-    internBars: { name: string; fullName: string; score: number; attendance: number; tasks: number }[];
-  };
-  interns: (InternRow & {
-    work: {
-      done: number;
-      submitted: number;
-      needsImprovement: number;
-      assigned: number;
-      recentTitles: string[];
-    };
-  })[];
-  recentWork: {
-    internName: string;
-    email: string;
-    title: string;
-    dayNumber: number;
-    taskNumber: number;
-    status: string;
-    forDate: string;
-  }[];
 };
 
 type FilterState = {
@@ -320,9 +287,10 @@ export function AnalyticsPage() {
   const [error, setError] = useState("");
   const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
   const [applied, setApplied] = useState<FilterState>(EMPTY_FILTERS);
-  const [detail, setDetail] = useState<DetailPayload | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState("");
+  const [drill, setDrill] = useState<DrillFrame[]>([]);
+  const [exporting, setExporting] = useState(false);
+  const [printing, setPrinting] = useState(false);
+  const currentDrill = drill[drill.length - 1] ?? null;
 
   useEffect(() => {
     api
@@ -354,29 +322,34 @@ export function AnalyticsPage() {
   );
 
   useEffect(() => {
-    if (detail) return; // pause tab reload while drilling down
+    if (currentDrill) return; // pause tab reload while drilling down
     loadTab(tab, applied, page);
-  }, [tab, applied, page, loadTab, detail]);
+  }, [tab, applied, page, loadTab, currentDrill]);
 
   function switchTab(next: TabId) {
-    setDetail(null);
+    setDrill([]);
     setTab(next);
     setPage(1);
   }
 
-  function openDetail(type: "college" | "group", name: string) {
-    setDetailLoading(true);
-    setDetailError("");
-    api
-      .get(`/analytics/detail?type=${encodeURIComponent(type)}&name=${encodeURIComponent(name)}`)
-      .then((r) => setDetail(r.data))
-      .catch(() => setDetailError("Could not load details."))
-      .finally(() => setDetailLoading(false));
+  function pushDrill(frame: DrillFrame) {
+    setDrill((d) => [...d, frame]);
   }
 
-  function closeDetail() {
-    setDetail(null);
-    setDetailError("");
+  function popDrill() {
+    setDrill((d) => d.slice(0, -1));
+  }
+
+  function openDetail(type: "college" | "group", name: string) {
+    pushDrill({ kind: type, name });
+  }
+
+  function openDay(date: string) {
+    pushDrill({ kind: "day", date: date.slice(0, 10) });
+  }
+
+  function openIntern(internId: string, label?: string) {
+    pushDrill({ kind: "intern", internId, label });
   }
 
   function applyFilters(e?: FormEvent) {
@@ -391,32 +364,50 @@ export function AnalyticsPage() {
     setPage(1);
   }
 
-  function exportCsv() {
-    if (tab !== "leaderboard") {
-      // fetch full leaderboard once for export
-      const qs = buildQuery(applied, "leaderboard", 1, 500);
-      api.get(`/analytics/dashboard?${qs}`).then((r) => {
-        downloadCsv(r.data.interns || []);
-      });
-      return;
+  const filterQueryForExport = useMemo(() => {
+    const params = new URLSearchParams();
+    if (applied.college && applied.college !== "all") params.set("college", applied.college);
+    if (applied.group && applied.group !== "all") params.set("group", applied.group);
+    if (applied.search.trim()) params.set("search", applied.search.trim());
+    if (applied.minScore !== "") params.set("minScore", applied.minScore);
+    if (applied.maxScore !== "") params.set("maxScore", applied.maxScore);
+    if (applied.minAttendance !== "") params.set("minAttendance", applied.minAttendance);
+    if (applied.maxAttendance !== "") params.set("maxAttendance", applied.maxAttendance);
+    if (applied.minTasks !== "") params.set("minTasks", applied.minTasks);
+    if (applied.maxTasks !== "") params.set("maxTasks", applied.maxTasks);
+    if (applied.from) params.set("from", applied.from);
+    if (applied.to) params.set("to", applied.to);
+    if (applied.sort) params.set("sort", applied.sort);
+    return params.toString();
+  }, [applied]);
+
+  async function exportExcel() {
+    setExporting(true);
+    setError("");
+    try {
+      const qs = filterQueryForExport;
+      // Full multi-sheet workbook: Overview + Tasks + Attendance + Colleges + Groups + Leaderboard
+      await downloadExcel(`/analytics/export?type=full${qs ? `&${qs}` : ""}`, "analytics-full-report.xlsx");
+    } catch {
+      setError("Export failed — large reports can take a minute. Try again if needed.");
+    } finally {
+      setExporting(false);
     }
-    downloadCsv(data?.interns || []);
   }
 
-  function downloadCsv(rows: InternRow[]) {
-    const header = ["Name", "Email", "College", "Group", "Score", "Attendance%", "Tasks%"];
-    const lines = rows.map((r) =>
-      [r.fullName, r.email, r.college || "", r.groupName || "", r.score, r.attendanceRate, r.taskCompletionRate]
-        .map((v) => `"${String(v).replace(/"/g, '""')}"`)
-        .join(","),
-    );
-    const blob = new Blob([[header.join(","), ...lines].join("\n")], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "performance-report.csv";
-    a.click();
-    URL.revokeObjectURL(url);
+  async function printReport() {
+    setPrinting(true);
+    setError("");
+    try {
+      await openAnalyticsPrintReport(filterQueryForExport);
+    } catch (e) {
+      const msg = e instanceof Error && e.message === "Popup blocked"
+        ? "Popup blocked — allow popups for Print report."
+        : "Print report failed — large reports can take a minute.";
+      setError(msg);
+    } finally {
+      setPrinting(false);
+    }
   }
 
   const summary = data?.summary;
@@ -555,65 +546,6 @@ export function AnalyticsPage() {
     };
   }, [charts?.byGroup]);
 
-  const detailBarsOption = useMemo<EChartsOption>(() => {
-    const bars = detail?.charts.internBars ?? [];
-    return {
-      tooltip: { trigger: "axis" },
-      legend: { top: 0 },
-      grid: { left: 48, right: 12, top: 36, bottom: 40 },
-      xAxis: { type: "category", data: bars.map((t) => t.name), axisLabel: { rotate: bars.length > 5 ? 30 : 0 } },
-      yAxis: { type: "value", max: 100 },
-      series: [
-        { name: "Score", type: "bar", data: bars.map((t) => t.score), itemStyle: { color: GREEN } },
-        { name: "Attendance", type: "bar", data: bars.map((t) => t.attendance), itemStyle: { color: TEAL } },
-        { name: "Tasks", type: "bar", data: bars.map((t) => t.tasks), itemStyle: { color: SKY } },
-      ],
-    };
-  }, [detail?.charts.internBars]);
-
-  const detailTaskOption = useMemo<EChartsOption>(() => {
-    const ts = detail?.charts.taskStatus ?? {};
-    return {
-      tooltip: { trigger: "item" },
-      legend: { bottom: 0 },
-      series: [
-        {
-          type: "pie",
-          radius: ["40%", "65%"],
-          center: ["50%", "45%"],
-          itemStyle: { borderRadius: 6, borderColor: "#fff", borderWidth: 2 },
-          label: { formatter: "{b}\n{d}%" },
-          data: [
-            { name: "Done", value: ts.DONE ?? 0, itemStyle: { color: GREEN } },
-            { name: "Submitted", value: ts.SUBMITTED ?? 0, itemStyle: { color: SKY } },
-            { name: "Needs work", value: ts.NEEDS_IMPROVEMENT ?? 0, itemStyle: { color: AMBER } },
-            { name: "Assigned", value: ts.ASSIGNED ?? 0, itemStyle: { color: SLATE } },
-          ],
-        },
-      ],
-    };
-  }, [detail?.charts.taskStatus]);
-
-  const detailTrendOption = useMemo<EChartsOption>(() => {
-    const trend = detail?.charts.attendanceTrend ?? [];
-    return {
-      tooltip: { trigger: "axis" },
-      grid: { left: 40, right: 16, top: 24, bottom: 40 },
-      dataZoom: [{ type: "inside" }, { type: "slider", height: 16, bottom: 4 }],
-      xAxis: { type: "category", data: trend.map((t) => t.date.slice(5)), boundaryGap: false },
-      yAxis: { type: "value", min: 0, max: 100, axisLabel: { formatter: "{value}%" } },
-      series: [
-        {
-          type: "line",
-          smooth: true,
-          areaStyle: { color: "rgba(22,163,74,0.2)" },
-          lineStyle: { color: GREEN },
-          data: trend.map((t) => t.rate),
-        },
-      ],
-    };
-  }, [detail?.charts.attendanceTrend]);
-
   const taskStatusRows = useMemo(() => {
     const ts = charts?.taskStatus ?? {};
     const total = (ts.DONE ?? 0) + (ts.SUBMITTED ?? 0) + (ts.NEEDS_IMPROVEMENT ?? 0) + (ts.ASSIGNED ?? 0);
@@ -635,14 +567,24 @@ export function AnalyticsPage() {
       <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
         <PageHeader
           title="Performance Analytics"
-          subtitle="Tabs load on demand · score = 0.5×attendance + 0.5×task completion"
+          subtitle="Full Excel / Print pulls all Tasks · Attendance · Colleges · Groups · Leaderboard from DB"
         />
         <div className="flex gap-2 print:hidden">
-          <button type="button" onClick={exportCsv} className="rounded-lg border bg-white px-3 py-2 text-sm hover:bg-slate-50">
-            Export CSV
+          <button
+            type="button"
+            disabled={exporting || printing || !!currentDrill}
+            onClick={exportExcel}
+            className="rounded-lg border bg-white px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-50"
+          >
+            {exporting ? "Building full Excel…" : "Export Excel dashboard"}
           </button>
-          <button type="button" onClick={() => window.print()} className="rounded-lg bg-green-600 px-3 py-2 text-sm text-white hover:bg-green-700">
-            Print report
+          <button
+            type="button"
+            disabled={printing || exporting || !!currentDrill}
+            onClick={printReport}
+            className="rounded-lg bg-green-600 px-3 py-2 text-sm text-white hover:bg-green-700 disabled:opacity-50"
+          >
+            {printing ? "Building print report…" : "Print report"}
           </button>
         </div>
       </div>
@@ -738,9 +680,21 @@ export function AnalyticsPage() {
       </div>
 
       {error && <p className="mb-3 text-sm text-rose-600">{error}</p>}
-      {loading && <p className="mb-3 text-xs text-slate-400">Loading {TABS.find((t) => t.id === tab)?.label}…</p>}
+      {loading && !currentDrill && <p className="mb-3 text-xs text-slate-400">Loading {TABS.find((t) => t.id === tab)?.label}…</p>}
 
-      {summary && !detail && (
+      {currentDrill && (
+        <AnalyticsDrillPanel
+          frame={currentDrill}
+          filterQuery={filterQueryForExport}
+          onBack={popDrill}
+          onOpenCollege={(name) => pushDrill({ kind: "college", name })}
+          onOpenGroup={(name) => pushDrill({ kind: "group", name })}
+          onOpenIntern={openIntern}
+          onOpenDay={openDay}
+        />
+      )}
+
+      {summary && !currentDrill && (
         <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {[
             ["Students", summary.count],
@@ -756,18 +710,29 @@ export function AnalyticsPage() {
         </div>
       )}
 
-      {!loading && data && tab === "overview" && (
+      {!currentDrill && !loading && data && tab === "overview" && (
         <div className="grid gap-4 lg:grid-cols-2">
           <ChartCard title="Overall performance score" subtitle="Filtered average score">
             <ReactECharts option={gaugeOption} style={{ height: 260 }} />
           </ChartCard>
-          <ChartCard title="Top interns comparison" subtitle="Score · attendance · tasks">
-            <ReactECharts option={topBarOption} style={{ height: 260 }} />
+          <ChartCard title="Top interns comparison" subtitle="Click a bar to open student details">
+            <ReactECharts
+              option={topBarOption}
+              style={{ height: 260 }}
+              onEvents={{
+                click: (params: { dataIndex?: number }) => {
+                  const idx = params.dataIndex;
+                  if (idx == null) return;
+                  const row = charts?.topInterns?.[idx];
+                  if (row?.internId) openIntern(row.internId, row.fullName);
+                },
+              }}
+            />
           </ChartCard>
         </div>
       )}
 
-      {!loading && data && tab === "tasks" && (
+      {!currentDrill && !loading && data && tab === "tasks" && (
         <div className="space-y-6">
           <ChartCard title="Task status breakdown" subtitle="Done / Submitted / Needs work / Assigned">
             <ReactECharts option={taskDonutOption} style={{ height: 280 }} />
@@ -776,27 +741,43 @@ export function AnalyticsPage() {
         </div>
       )}
 
-      {!loading && data && tab === "attendance" && (
+      {!currentDrill && !loading && data && tab === "attendance" && (
         <div className="space-y-6">
-          <ChartCard title="Daily attendance trend" subtitle="Present % by date — drag slider to zoom">
-            <ReactECharts option={trendOption} style={{ height: 280 }} />
+          <ChartCard title="Daily attendance trend" subtitle="Present % by date — click a point or table date to open roster">
+            <ReactECharts
+              option={trendOption}
+              style={{ height: 280 }}
+              onEvents={{
+                click: (params: { dataIndex?: number }) => {
+                  const idx = params.dataIndex;
+                  if (idx == null) return;
+                  const point = charts?.attendanceTrend?.[idx];
+                  if (point?.date) openDay(point.date);
+                },
+              }}
+            />
           </ChartCard>
           <div>
-            <DataTable
+            <ClickableTable
               title="Table · Daily attendance"
-              subtitle="Paginated day-wise present / absent / leave"
+              subtitle="Click a date to see every student's status that day"
               headers={["Date", "Present", "Absent", "Leave", "Counted", "Present %"]}
-              rows={(data.table?.rows ?? []).map((t) => [t.date, t.present, t.absent, t.leave, t.total, `${t.rate}%`])}
+              rows={(data.table?.rows ?? []).map((t) => ({
+                key: t.date,
+                cells: [t.date, t.present, t.absent, t.leave, t.total, `${t.rate}%`],
+                hint: `Open roster for ${t.date}`,
+              }))}
+              onRowClick={(date) => openDay(date)}
             />
             {data.table?.pagination && <Pager pagination={data.table.pagination} onChange={setPage} />}
           </div>
         </div>
       )}
 
-      {!loading && data && tab === "colleges" && !detail && !detailLoading && (
+      {!currentDrill && !loading && data && tab === "colleges" && (
         <div className="space-y-6">
           <p className="text-sm text-slate-500">
-            Tip: table row ya chart pe click karke us college / group ka student list + work details dekho.
+            Tip: college / group pe click karke students dekho — phir student, group, ya college names pe click karke aage drill karo.
           </p>
           <div className="grid gap-4 lg:grid-cols-2">
             <ChartCard title="College-wise performance" subtitle="Click a college bar to open details">
@@ -824,7 +805,7 @@ export function AnalyticsPage() {
           </div>
           <ClickableTable
             title="Table · College-wise"
-            subtitle="Click a college to see how many students and what they are working on"
+            subtitle="Click a college to see students and related groups"
             headers={["College", "Interns", "Avg score", "Avg attendance", "Avg tasks"]}
             rows={(charts?.byCollege ?? []).map((c) => ({
               key: c.name,
@@ -835,7 +816,7 @@ export function AnalyticsPage() {
           />
           <ClickableTable
             title="Table · Group-wise"
-            subtitle="Click a group to see members and their task progress"
+            subtitle="Click a group to see members and related colleges"
             headers={["Group", "Interns", "Avg score", "Tasks done", "Tasks total"]}
             rows={(charts?.byGroup ?? []).map((g) => ({
               key: g.name,
@@ -847,125 +828,7 @@ export function AnalyticsPage() {
         </div>
       )}
 
-      {(detailLoading || detailError) && tab === "colleges" && (
-        <div className="mb-4">
-          {detailLoading && <p className="text-sm text-slate-500">Loading details…</p>}
-          {detailError && <p className="text-sm text-rose-600">{detailError}</p>}
-        </div>
-      )}
-
-      {detail && tab === "colleges" && (
-        <div className="space-y-6">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <button type="button" onClick={closeDetail} className="mb-1 text-sm text-green-700 hover:underline">
-                ← Back to College & Group
-              </button>
-              <h2 className="text-lg font-semibold text-slate-900">
-                {detail.type === "college" ? "College" : "Group"}: {detail.name}
-              </h2>
-              <p className="text-sm text-slate-500">
-                {detail.summary.count} students · avg score {detail.summary.avgScore}% · {detail.summary.totalAssignments}{" "}
-                task assignments
-              </p>
-            </div>
-          </div>
-
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {[
-              ["Students", detail.summary.count],
-              ["Avg score", `${detail.summary.avgScore}%`],
-              ["Avg attendance", `${detail.summary.avgAttendance}%`],
-              ["Avg tasks", `${detail.summary.avgTasks}%`],
-            ].map(([label, value]) => (
-              <div key={String(label)} className="rounded-xl border bg-white p-4 shadow-sm">
-                <p className="text-xs uppercase text-slate-500">{label}</p>
-                <p className="mt-1 text-2xl font-bold">{value}</p>
-              </div>
-            ))}
-          </div>
-
-          <div className="grid gap-4 lg:grid-cols-2">
-            <ChartCard title="Students comparison" subtitle="Score · attendance · task completion for each student">
-              <ReactECharts option={detailBarsOption} style={{ height: 280 }} />
-            </ChartCard>
-            <ChartCard title="Task status in this set" subtitle="What work is done vs pending">
-              <ReactECharts option={detailTaskOption} style={{ height: 280 }} />
-            </ChartCard>
-          </div>
-
-          <ChartCard title="Attendance trend" subtitle="Present % over time for these students">
-            <ReactECharts option={detailTrendOption} style={{ height: 240 }} />
-          </ChartCard>
-
-          <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-            <div className="border-b bg-slate-50 px-4 py-3">
-              <p className="text-sm font-semibold text-slate-800">Students in {detail.name}</p>
-              <p className="text-xs text-slate-500">Performance + current work snapshot</p>
-            </div>
-            <table className="min-w-full text-left text-sm">
-              <thead className="border-b text-slate-500">
-                <tr>
-                  <th className="px-4 py-3">#</th>
-                  <th className="px-4 py-3">Name</th>
-                  <th className="px-4 py-3">College</th>
-                  <th className="px-4 py-3">Group</th>
-                  <th className="px-4 py-3">Attendance</th>
-                  <th className="px-4 py-3">Tasks</th>
-                  <th className="px-4 py-3">Score</th>
-                  <th className="px-4 py-3">Work status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {detail.interns.map((r, i) => (
-                  <tr key={r.internId} className="border-b align-top last:border-0">
-                    <td className="px-4 py-3 text-slate-400">{i + 1}</td>
-                    <td className="px-4 py-3">
-                      <div className="font-medium">{r.fullName}</div>
-                      <div className="text-xs text-slate-400">{r.email}</div>
-                    </td>
-                    <td className="px-4 py-3">{r.college || "—"}</td>
-                    <td className="px-4 py-3">{r.groupName || "—"}</td>
-                    <td className="px-4 py-3">{r.attendanceRate}%</td>
-                    <td className="px-4 py-3">
-                      {r.doneTasks}/{r.totalTasks} ({r.taskCompletionRate}%)
-                    </td>
-                    <td className="px-4 py-3 font-semibold text-green-700">{r.score}%</td>
-                    <td className="px-4 py-3 text-xs text-slate-600">
-                      <p>
-                        Done {r.work.done} · Submitted {r.work.submitted} · Needs {r.work.needsImprovement} · Assigned{" "}
-                        {r.work.assigned}
-                      </p>
-                      {r.work.recentTitles.length > 0 && (
-                        <ul className="mt-1 list-disc pl-4 text-slate-500">
-                          {r.work.recentTitles.map((t) => (
-                            <li key={t}>{t}</li>
-                          ))}
-                        </ul>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <DataTable
-            title="Recent work across students"
-            subtitle="Latest task assignments and status"
-            headers={["Intern", "Task", "Day/Task", "Status", "For date"]}
-            rows={detail.recentWork.map((w) => [
-              w.internName,
-              w.title,
-              `Day ${w.dayNumber} · Task ${w.taskNumber}`,
-              w.status,
-              String(w.forDate).slice(0, 10),
-            ])}
-          />
-        </div>
-      )}
-
-      {!loading && data && tab === "leaderboard" && (
+      {!currentDrill && !loading && data && tab === "leaderboard" && (
         <div>
           <div className="mb-4 print:hidden">
             <ChartCard title="Top 10 preview" subtitle="Under current sort / filters">
@@ -975,7 +838,7 @@ export function AnalyticsPage() {
           <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
             <div className="border-b bg-slate-50 px-4 py-3">
               <p className="text-sm font-semibold text-slate-800">Intern leaderboard</p>
-              <p className="text-xs text-slate-500">Paginated list — change page below</p>
+              <p className="text-xs text-slate-500">Click name / college / group to drill down</p>
             </div>
             <table className="min-w-full text-left text-sm">
               <thead className="border-b text-slate-500">
@@ -996,11 +859,41 @@ export function AnalyticsPage() {
                     <tr key={r.internId} className="border-b last:border-0 hover:bg-slate-50/80">
                       <td className="px-4 py-3 text-slate-400">{rank}</td>
                       <td className="px-4 py-3">
-                        <div className="font-medium">{r.fullName}</div>
+                        <button
+                          type="button"
+                          onClick={() => openIntern(r.internId, r.fullName)}
+                          className="font-medium text-green-800 underline-offset-2 hover:underline"
+                        >
+                          {r.fullName}
+                        </button>
                         <div className="text-xs text-slate-400">{r.email}</div>
                       </td>
-                      <td className="px-4 py-3">{r.college || "—"}</td>
-                      <td className="px-4 py-3">{r.groupName || "—"}</td>
+                      <td className="px-4 py-3">
+                        {r.college ? (
+                          <button
+                            type="button"
+                            onClick={() => openDetail("college", r.college!)}
+                            className="text-green-800 underline-offset-2 hover:underline"
+                          >
+                            {r.college}
+                          </button>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        {r.groupName ? (
+                          <button
+                            type="button"
+                            onClick={() => openDetail("group", r.groupName!)}
+                            className="text-green-800 underline-offset-2 hover:underline"
+                          >
+                            {r.groupName}
+                          </button>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
                       <td className="px-4 py-3">{r.attendanceRate}%</td>
                       <td className="px-4 py-3">
                         {r.doneTasks}/{r.totalTasks} ({r.taskCompletionRate}%)
