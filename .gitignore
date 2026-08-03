@@ -43,6 +43,10 @@ scripts/*.pid
 .cursor/
 agent-transcripts/
 
+# Local-only secrets / deploy notes (never push)
+SERVER_DEPLOY.local.md
+LOGIN_CREDENTIALS.md
+
 # AI agent skills/config (auto-generated)
 backend/.agents/
 backend/.claude/
