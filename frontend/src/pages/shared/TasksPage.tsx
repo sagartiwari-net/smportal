@@ -678,6 +678,8 @@ export function TasksPage() {
         setGroupPage(1);
         await loadGroupSummaries();
         await loadGroupBatches(assignGroupId, { page: 1 });
+      } else if (assignedCount > 0 && assignTarget === "individual") {
+        setSelectedInternIds([]);
       }
 
       await Promise.all([loadLibrary({ page: libPage }), loadLibraryOptions()]);

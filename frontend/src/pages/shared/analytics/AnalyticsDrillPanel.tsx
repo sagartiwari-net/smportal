@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
 import { api } from "../../../api/client";
@@ -244,6 +244,8 @@ export function AnalyticsDrillPanel({
   const [pageLimit] = useState(20);
   const [exporting, setExporting] = useState(false);
   const [statusBusy, setStatusBusy] = useState(false);
+  /** Bumps on each frame change — stale tab fetches are ignored */
+  const loadEpochRef = useRef(0);
 
   const internReportUrl = useCallback(
     (params: Record<string, string | number>) => {
@@ -257,40 +259,93 @@ export function AnalyticsDrillPanel({
   async function reloadDossierSummary() {
     if (frame.kind !== "intern") return;
     const r = await api.get(internReportUrl({ include: "summary" }));
-    setDossier(r.data);
+    setDossier((prev) => {
+      const sameIntern = prev?.intern?.id === r.data.intern?.id;
+      return {
+        ...r.data,
+        attendance: prev && sameIntern ? prev.attendance : undefined,
+        tasks: prev && sameIntern ? prev.tasks : undefined,
+      };
+    });
   }
 
   async function loadAttendanceTab(page = attPage) {
     if (frame.kind !== "intern") return;
+    const epoch = loadEpochRef.current;
+    const internId = frame.internId;
     setTabLoading(true);
     try {
       const r = await api.get(internReportUrl({ include: "attendance", attPage: page, attLimit: pageLimit }));
+      // #region agent log
+      fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
+        body: JSON.stringify({
+          sessionId: "e69c79",
+          hypothesisId: "A",
+          location: "AnalyticsDrillPanel.tsx:loadAttendanceTab",
+          message: "attendance tab response",
+          data: {
+            epoch,
+            currentEpoch: loadEpochRef.current,
+            requestInternId: internId,
+            stale: epoch !== loadEpochRef.current,
+            recordCount: r.data.attendance?.records?.length ?? 0,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      if (epoch !== loadEpochRef.current) return;
       setDossier((prev) =>
         prev
           ? { ...prev, attendance: r.data.attendance }
           : { intern: r.data.intern, performance: r.data.performance, attendance: r.data.attendance },
       );
     } catch {
-      setError("Could not load attendance.");
+      if (epoch === loadEpochRef.current) setError("Could not load attendance.");
     } finally {
-      setTabLoading(false);
+      if (epoch === loadEpochRef.current) setTabLoading(false);
     }
   }
 
   async function loadTasksTab(page = taskPage) {
     if (frame.kind !== "intern") return;
+    const epoch = loadEpochRef.current;
+    const internId = frame.internId;
     setTabLoading(true);
     try {
       const r = await api.get(internReportUrl({ include: "tasks", taskPage: page, taskLimit: pageLimit }));
+      // #region agent log
+      fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
+        body: JSON.stringify({
+          sessionId: "e69c79",
+          hypothesisId: "A",
+          location: "AnalyticsDrillPanel.tsx:loadTasksTab",
+          message: "tasks tab response",
+          data: {
+            epoch,
+            currentEpoch: loadEpochRef.current,
+            requestInternId: internId,
+            stale: epoch !== loadEpochRef.current,
+            recordCount: r.data.tasks?.records?.length ?? 0,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      if (epoch !== loadEpochRef.current) return;
       setDossier((prev) =>
         prev
           ? { ...prev, tasks: r.data.tasks }
           : { intern: r.data.intern, performance: r.data.performance, tasks: r.data.tasks },
       );
     } catch {
-      setError("Could not load tasks.");
+      if (epoch === loadEpochRef.current) setError("Could not load tasks.");
     } finally {
-      setTabLoading(false);
+      if (epoch === loadEpochRef.current) setTabLoading(false);
     }
   }
 
@@ -306,6 +361,22 @@ export function AnalyticsDrillPanel({
     try {
       await api.patch(`/interns/${frame.internId}/status`, { internshipStatus: next });
       await reloadDossierSummary();
+      // #region agent log
+      fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
+        body: JSON.stringify({
+          sessionId: "e69c79",
+          hypothesisId: "B",
+          location: "AnalyticsDrillPanel.tsx:toggleInternComplete",
+          message: "intern status updated",
+          data: { next, internTab },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      if (internTab === "attendance") void loadAttendanceTab(attPage);
+      else if (internTab === "tasks") void loadTasksTab(taskPage);
       onInternUpdated?.();
     } catch {
       setError("Could not update internship status.");
@@ -315,6 +386,25 @@ export function AnalyticsDrillPanel({
   }
 
   useEffect(() => {
+    loadEpochRef.current += 1;
+    // #region agent log
+    fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
+      body: JSON.stringify({
+        sessionId: "e69c79",
+        hypothesisId: "A",
+        location: "AnalyticsDrillPanel.tsx:frameEffect",
+        message: "frame changed",
+        data: {
+          epoch: loadEpochRef.current,
+          kind: frame.kind,
+          internId: frame.kind === "intern" ? frame.internId : null,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
     setLoading(true);
     setError("");
     setDetail(null);
@@ -323,6 +413,7 @@ export function AnalyticsDrillPanel({
     setInternTab("overview");
     setAttPage(1);
     setTaskPage(1);
+    setTabLoading(false);
 
     if (frame.kind === "college" || frame.kind === "group") {
       api
