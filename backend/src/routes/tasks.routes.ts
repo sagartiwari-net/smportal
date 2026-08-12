@@ -1417,8 +1417,28 @@ router.post("/", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
 
   let task;
   if (parsed.data.libraryTaskId) {
-    task = await prisma.task.findUnique({ where: { id: parsed.data.libraryTaskId } });
-    if (!task) return res.status(404).json({ message: "Library task not found" });
+    const library = await prisma.task.findUnique({ where: { id: parsed.data.libraryTaskId } });
+    if (!library) return res.status(404).json({ message: "Library task not found" });
+    if (library.isLibrary) {
+      task = await prisma.task.create({
+        data: {
+          title: library.title,
+          description: library.description,
+          isLibrary: false,
+          sourceLibraryId: library.id,
+          groupId: parsed.data.groupId || null,
+          createdById: req.user!.id,
+        },
+      });
+    } else {
+      task = library;
+      if (parsed.data.groupId) {
+        await prisma.task.update({
+          where: { id: task.id },
+          data: { groupId: parsed.data.groupId },
+        });
+      }
+    }
   } else {
     if (!parsed.data.title || !parsed.data.description) {
       return res.status(400).json({ message: "title and description required (or pick libraryTaskId)" });

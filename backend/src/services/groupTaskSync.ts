@@ -25,91 +25,108 @@ export function taskIdentityKey(task: TaskIdentity): string {
   return `title:${task.title.trim().toLowerCase()}`;
 }
 
-const taskSelect = {
-  id: true,
-  title: true,
-  sourceLibraryId: true,
-  assignments: {
-    take: 1,
-    orderBy: { createdAt: "asc" as const },
-    select: {
-      forDate: true,
-      dayNumber: true,
-      taskNumber: true,
-    },
-  },
-};
-
 /**
  * Group-wide tasks for sync when a new member joins.
- * Includes tasks tagged with groupId. Legacy untagged tasks only if assigned to 2+
- * current/past members of this group (excludes one-off individual assignments).
+ * - Tasks tagged with this groupId (always)
+ * - Legacy bulk assigns: same task given to 2+ members of this group (not one-off individual)
+ * Dedupes by curriculum identity; picks the task row most members already use.
  */
 export async function findTasksForGroup(groupId: string): Promise<GroupTaskRow[]> {
-  const tagged = await prisma.task.findMany({
-    where: {
-      groupId,
-      isLibrary: false,
-      assignments: { some: {} },
-    },
-    select: taskSelect,
-  });
+  const activeMemberIds = (
+    await prisma.groupMember.findMany({
+      where: { groupId, isActive: true },
+      select: { internId: true },
+    })
+  ).map((m) => m.internId);
 
-  const memberIds = (
+  const allMemberIds = (
     await prisma.groupMember.findMany({
       where: { groupId },
       select: { internId: true },
     })
   ).map((m) => m.internId);
 
-  if (memberIds.length < 2) {
-    return tagged;
-  }
+  if (!allMemberIds.length) return [];
 
-  const taggedIds = new Set(tagged.map((t) => t.id));
-  const legacyRaw = await prisma.task.findMany({
+  const rows = await prisma.taskAssignment.findMany({
     where: {
-      isLibrary: false,
-      groupId: null,
-      assignments: { some: { internId: { in: memberIds } } },
+      internId: { in: allMemberIds },
+      task: { isLibrary: false },
     },
     select: {
-      id: true,
-      title: true,
-      sourceLibraryId: true,
-      assignments: {
-        where: { internId: { in: memberIds } },
-        orderBy: { createdAt: "asc" },
+      internId: true,
+      forDate: true,
+      dayNumber: true,
+      taskNumber: true,
+      createdAt: true,
+      task: {
         select: {
-          forDate: true,
-          dayNumber: true,
-          taskNumber: true,
-          createdAt: true,
+          id: true,
+          title: true,
+          sourceLibraryId: true,
+          groupId: true,
         },
       },
     },
+    orderBy: { createdAt: "asc" },
   });
 
-  const legacy: GroupTaskRow[] = [];
-  for (const t of legacyRaw) {
-    if (taggedIds.has(t.id)) continue;
-    if (t.assignments.length < 2) continue; // individual assign — skip
-    const first = t.assignments[0];
-    legacy.push({
-      id: t.id,
-      title: t.title,
-      sourceLibraryId: t.sourceLibraryId,
-      assignments: [
-        {
-          forDate: first.forDate,
-          dayNumber: first.dayNumber,
-          taskNumber: first.taskNumber,
-        },
-      ],
+  type Agg = {
+    task: { id: string; title: string; sourceLibraryId: string | null; groupId: string | null };
+    assignees: Set<string>;
+    first: { forDate: Date; dayNumber: number; taskNumber: number };
+  };
+  const byTaskId = new Map<string, Agg>();
+
+  for (const r of rows) {
+    let agg = byTaskId.get(r.task.id);
+    if (!agg) {
+      agg = {
+        task: r.task,
+        assignees: new Set(),
+        first: { forDate: r.forDate, dayNumber: r.dayNumber, taskNumber: r.taskNumber },
+      };
+      byTaskId.set(r.task.id, agg);
+    }
+    agg.assignees.add(r.internId);
+  }
+
+  const minBulkAssignees = activeMemberIds.length <= 1 ? 1 : 2;
+  const candidates: GroupTaskRow[] = [];
+
+  for (const agg of byTaskId.values()) {
+    const taggedThisGroup = agg.task.groupId === groupId;
+    const bulkForGroup = agg.assignees.size >= minBulkAssignees;
+    if (!taggedThisGroup && !bulkForGroup) continue;
+
+    candidates.push({
+      id: agg.task.id,
+      title: agg.task.title,
+      sourceLibraryId: agg.task.sourceLibraryId,
+      assignments: [agg.first],
     });
   }
 
-  return [...tagged, ...legacy];
+  // One row per curriculum task — use the clone most members already have
+  const byIdentity = new Map<string, GroupTaskRow & { assigneeCount: number }>();
+  for (const c of candidates) {
+    const key = taskIdentityKey(c);
+    const count = byTaskId.get(c.id)?.assignees.size ?? 0;
+    const prev = byIdentity.get(key);
+    if (!prev || count > prev.assigneeCount) {
+      byIdentity.set(key, { ...c, assigneeCount: count });
+    }
+  }
+
+  const result = [...byIdentity.values()].map(({ assigneeCount: _, ...rest }) => rest);
+
+  if (result.length === 0 && rows.length > 0) {
+    console.warn(
+      `[groupTaskSync] group=${groupId} has ${rows.length} assignment row(s) but 0 group-wide tasks (likely individual-only assigns)`,
+    );
+  }
+
+  return result;
 }
 
 export async function findSiblingAssignment(
@@ -192,11 +209,9 @@ export async function syncGroupTasksToInterns(groupId: string, internIds: string
     }
   }
 
-  if (assigned > 0) {
-    console.log(
-      `[groupTaskSync] group=${groupId} interns=${uniqueIds.length} tasks=${groupTasks.length} assigned=${assigned}`,
-    );
-  }
+  console.log(
+    `[groupTaskSync] group=${groupId} interns=${uniqueIds.length} found=${groupTasks.length} assigned=${assigned} synced=${synced}`,
+  );
 
   return { assigned, synced, taskCount: groupTasks.length };
 }
