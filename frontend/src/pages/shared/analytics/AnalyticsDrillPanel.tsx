@@ -3,7 +3,6 @@ import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
 import { api } from "../../../api/client";
 import { downloadExcel } from "../../../api/downloadExcel";
-import { useAuth } from "../../../auth/AuthContext";
 
 const GREEN = "#16a34a";
 const TEAL = "#0d9488";
@@ -132,26 +131,7 @@ type InternDossier = {
   };
 };
 
-type InternTab = "overview" | "attendance" | "tasks" | "plagiarism";
-
-type PlagiarismFlag = {
-  assignmentId: string;
-  taskTitle: string;
-  dayNumber: number;
-  taskNumber: number;
-  forDate: string;
-  githubUrl: string;
-  projectDetailsPreview: string;
-  maxSimilarity: number;
-  matches: {
-    internId: string;
-    fullName: string;
-    email: string;
-    similarity: number;
-    matchType: "GITHUB_URL" | "PROJECT_TEXT" | "BOTH";
-    githubUrl: string;
-  }[];
-};
+type InternTab = "overview" | "attendance" | "tasks";
 
 type Pagination = { page: number; limit: number; total: number; totalPages: number };
 
@@ -252,10 +232,6 @@ export function AnalyticsDrillPanel({
   canManageIntern,
   onInternUpdated,
 }: Props) {
-  const { user } = useAuth();
-  const canViewPlagiarism =
-    user?.role === "ADMIN" || user?.role === "HR" || user?.role === "TRAINER" || user?.role === "COLLEGE";
-
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [detail, setDetail] = useState<DetailPayload | null>(null);
@@ -265,13 +241,7 @@ export function AnalyticsDrillPanel({
   const [tabLoading, setTabLoading] = useState(false);
   const [attPage, setAttPage] = useState(1);
   const [taskPage, setTaskPage] = useState(1);
-  const [plagPage, setPlagPage] = useState(1);
   const [pageLimit] = useState(20);
-  const [plagiarism, setPlagiarism] = useState<{
-    summary: { totalFlags: number; checkedSubmissions: number };
-    flags: PlagiarismFlag[];
-    pagination: Pagination;
-  } | null>(null);
   const [exporting, setExporting] = useState(false);
   const [statusBusy, setStatusBusy] = useState(false);
 
@@ -324,21 +294,6 @@ export function AnalyticsDrillPanel({
     }
   }
 
-  async function loadPlagiarismTab(page = plagPage) {
-    if (frame.kind !== "intern") return;
-    setTabLoading(true);
-    try {
-      const r = await api.get(`/interns/${frame.internId}/plagiarism`, {
-        params: { page, limit: pageLimit },
-      });
-      setPlagiarism(r.data);
-    } catch {
-      setError("Could not load plagiarism check.");
-    } finally {
-      setTabLoading(false);
-    }
-  }
-
   async function toggleInternComplete() {
     if (frame.kind !== "intern" || !dossier) return;
     const next = dossier.intern.internshipStatus === "COMPLETED" ? "ACTIVE" : "COMPLETED";
@@ -365,11 +320,9 @@ export function AnalyticsDrillPanel({
     setDetail(null);
     setDay(null);
     setDossier(null);
-    setPlagiarism(null);
     setInternTab("overview");
     setAttPage(1);
     setTaskPage(1);
-    setPlagPage(1);
 
     if (frame.kind === "college" || frame.kind === "group") {
       api
@@ -401,8 +354,7 @@ export function AnalyticsDrillPanel({
     if (frame.kind !== "intern" || loading || !dossier) return;
     if (internTab === "attendance") void loadAttendanceTab(attPage);
     if (internTab === "tasks") void loadTasksTab(taskPage);
-    if (internTab === "plagiarism" && canViewPlagiarism) void loadPlagiarismTab(plagPage);
-  }, [frame.kind, internTab, attPage, taskPage, plagPage, loading, dossier?.intern.id]);
+  }, [frame.kind, internTab, attPage, taskPage, loading, dossier?.intern.id]);
 
   const detailBarsOption = useMemo<EChartsOption>(() => {
     const bars = detail?.charts.internBars ?? [];
@@ -815,7 +767,6 @@ export function AnalyticsDrillPanel({
                   ["overview", "Overview"],
                   ["attendance", `Attendance (${dossier.performance.present + dossier.performance.absent + dossier.performance.leave})`],
                   ["tasks", `Tasks (${dossier.performance.totalTasks})`],
-                  ...(canViewPlagiarism ? [["plagiarism", "Plagiarism"]] : []),
                 ] as [InternTab, string][]
               ).map(([id, label]) => (
                 <button
@@ -838,9 +789,8 @@ export function AnalyticsDrillPanel({
             {internTab === "overview" && (
               <div className="p-4 text-sm text-slate-600">
                 <p>
-                  Open <strong>Attendance</strong>, <strong>Tasks</strong>
-                  {canViewPlagiarism ? " or Plagiarism" : ""} tabs to load detailed records on demand — faster when data
-                  grows large.
+                  Open <strong>Attendance</strong> or <strong>Tasks</strong> tabs to load detailed records on demand —
+                  faster when data grows large.
                 </p>
                 <div className="mt-4 grid gap-3 sm:grid-cols-3">
                   <div className="rounded-lg border p-3">
@@ -921,70 +871,6 @@ export function AnalyticsDrillPanel({
                 )}
                 {dossier.tasks.pagination && (
                   <TabPager pagination={dossier.tasks.pagination} onChange={setTaskPage} />
-                )}
-              </>
-            )}
-
-            {internTab === "plagiarism" && canViewPlagiarism && !tabLoading && plagiarism && (
-              <>
-                <div className="border-b bg-slate-50 px-4 py-3 text-xs text-slate-600">
-                  Checked {plagiarism.summary.checkedSubmissions} submitted task(s). Flags when another intern has the
-                  same GitHub repo or ≥70% similar project description on the same curriculum task.
-                </div>
-                {plagiarism.flags.length === 0 ? (
-                  <p className="p-4 text-sm text-green-700">No plagiarism flags found.</p>
-                ) : (
-                  <div className="divide-y">
-                    {plagiarism.flags.map((f) => (
-                      <div key={f.assignmentId} className="p-4">
-                        <div className="flex flex-wrap items-start justify-between gap-2">
-                          <div>
-                            <p className="font-medium text-slate-900">
-                              Day {f.dayNumber} · Task {f.taskNumber}: {f.taskTitle}
-                            </p>
-                            <p className="text-xs text-slate-500">{f.forDate}</p>
-                            <p className="mt-1 break-all text-xs text-slate-600">GitHub: {f.githubUrl}</p>
-                          </div>
-                          <span
-                            className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
-                              f.maxSimilarity >= 100 ? "bg-rose-100 text-rose-800" : "bg-amber-100 text-amber-800"
-                            }`}
-                          >
-                            {f.maxSimilarity}% match
-                          </span>
-                        </div>
-                        <p className="mt-2 line-clamp-2 text-xs text-slate-500">{f.projectDetailsPreview}</p>
-                        <div className="mt-3 overflow-x-auto rounded-lg border">
-                          <table className="min-w-full text-left text-xs">
-                            <thead className="border-b bg-slate-50 text-slate-500">
-                              <tr>
-                                <th className="px-3 py-2">Matched intern</th>
-                                <th className="px-3 py-2">Type</th>
-                                <th className="px-3 py-2">Similarity</th>
-                                <th className="px-3 py-2">Their GitHub</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {f.matches.map((m) => (
-                                <tr key={`${f.assignmentId}-${m.internId}`} className="border-b last:border-0">
-                                  <td className="px-3 py-2">
-                                    {linkBtn(m.fullName, () => onOpenIntern(m.internId, m.fullName))}
-                                    <div className="text-slate-400">{m.email}</div>
-                                  </td>
-                                  <td className="px-3 py-2">{m.matchType.replace(/_/g, " ")}</td>
-                                  <td className="px-3 py-2 font-medium">{m.similarity}%</td>
-                                  <td className="max-w-[200px] truncate px-3 py-2 text-slate-600">{m.githubUrl}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {plagiarism.pagination.totalPages > 1 && (
-                  <TabPager pagination={plagiarism.pagination} onChange={setPlagPage} />
                 )}
               </>
             )}
