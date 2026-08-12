@@ -135,7 +135,7 @@ type InternDossier = {
 };
 
 type InternTab = "overview" | "attendance" | "tasks";
-type DetailTab = "overview" | "charts" | "students" | "related" | "work";
+type DetailTab = "overview" | "students" | "related" | "work";
 
 type Pagination = { page: number; limit: number; pageSize?: number; total: number; totalPages: number };
 
@@ -249,6 +249,7 @@ export function AnalyticsDrillPanel({
   const [internTab, setInternTab] = useState<InternTab>("overview");
   const [detailTab, setDetailTab] = useState<DetailTab>("overview");
   const [tabLoading, setTabLoading] = useState(false);
+  const [chartsLoading, setChartsLoading] = useState(false);
   const [attPage, setAttPage] = useState(1);
   const [taskPage, setTaskPage] = useState(1);
   const [studentsPage, setStudentsPage] = useState(1);
@@ -302,29 +303,15 @@ export function AnalyticsDrillPanel({
   async function loadDetailCharts() {
     if (frame.kind !== "college" && frame.kind !== "group") return;
     const epoch = loadEpochRef.current;
-    setTabLoading(true);
+    setChartsLoading(true);
     try {
       const r = await api.get(detailUrl({ section: "charts" }));
       if (epoch !== loadEpochRef.current) return;
-      // #region agent log
-      fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
-        body: JSON.stringify({
-          sessionId: "e69c79",
-          location: "AnalyticsDrillPanel.tsx:loadDetailCharts",
-          message: "detail section loaded",
-          data: { section: "charts", kind: frame.kind, name: frame.name },
-          timestamp: Date.now(),
-          hypothesisId: "H-lazy-tabs",
-        }),
-      }).catch(() => {});
-      // #endregion
       setDetail((prev) => (prev ? { ...prev, charts: r.data.charts, summary: r.data.summary ?? prev.summary } : r.data));
     } catch {
       if (epoch === loadEpochRef.current) setError("Could not load charts.");
     } finally {
-      if (epoch === loadEpochRef.current) setTabLoading(false);
+      if (epoch === loadEpochRef.current) setChartsLoading(false);
     }
   }
 
@@ -335,20 +322,6 @@ export function AnalyticsDrillPanel({
     try {
       const r = await api.get(detailUrl({ section: "students", page, pageSize: detailPageSize }));
       if (epoch !== loadEpochRef.current) return;
-      // #region agent log
-      fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
-        body: JSON.stringify({
-          sessionId: "e69c79",
-          location: "AnalyticsDrillPanel.tsx:loadDetailStudents",
-          message: "detail section loaded",
-          data: { section: "students", page, count: r.data.interns?.length ?? 0 },
-          timestamp: Date.now(),
-          hypothesisId: "H-lazy-tabs",
-        }),
-      }).catch(() => {});
-      // #endregion
       setDetail((prev) =>
         prev
           ? { ...prev, interns: r.data.interns, studentsPagination: r.data.studentsPagination }
@@ -466,20 +439,6 @@ export function AnalyticsDrillPanel({
     if (!confirm(msg)) return;
     setStatusBusy(true);
     try {
-      // #region agent log
-      fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
-        body: JSON.stringify({
-          sessionId: "e69c79",
-          location: "AnalyticsDrillPanel.tsx:toggleInternComplete",
-          message: "intern status patch",
-          data: { internshipStatus: next, isHired: dossier.intern.isHired },
-          timestamp: Date.now(),
-          hypothesisId: "H-separate-hire",
-        }),
-      }).catch(() => {});
-      // #endregion
       await api.patch(`/interns/${frame.internId}/status`, { internshipStatus: next });
       await reloadDossierSummary();
       if (internTab === "attendance") void loadAttendanceTab(attPage);
@@ -501,20 +460,6 @@ export function AnalyticsDrillPanel({
     if (!confirm(msg)) return;
     setStatusBusy(true);
     try {
-      // #region agent log
-      fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
-        body: JSON.stringify({
-          sessionId: "e69c79",
-          location: "AnalyticsDrillPanel.tsx:toggleInternHired",
-          message: "intern hire patch",
-          data: { isHired: next, internshipStatus: dossier.intern.internshipStatus },
-          timestamp: Date.now(),
-          hypothesisId: "H-separate-hire",
-        }),
-      }).catch(() => {});
-      // #endregion
       await api.patch(`/interns/${frame.internId}/status`, {
         isHired: next,
         hireNote: next ? hireNote.trim() || undefined : undefined,
@@ -539,20 +484,6 @@ export function AnalyticsDrillPanel({
     if (!confirm(msg)) return;
     setStatusBusy(true);
     try {
-      // #region agent log
-      fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
-        body: JSON.stringify({
-          sessionId: "e69c79",
-          location: "AnalyticsDrillPanel.tsx:toggleGroupComplete",
-          message: "group complete patch",
-          data: { groupId: g.id, internshipStatus: next },
-          timestamp: Date.now(),
-          hypothesisId: "H-group-complete",
-        }),
-      }).catch(() => {});
-      // #endregion
       await api.patch(`/groups/${g.id}/complete`, { internshipStatus: next });
       await reloadDetailSummary();
       onGroupUpdated?.();
@@ -577,26 +508,13 @@ export function AnalyticsDrillPanel({
     setStudentsPage(1);
     setWorkPage(1);
     setTabLoading(false);
+    setChartsLoading(false);
     setHireNote("");
 
     if (frame.kind === "college" || frame.kind === "group") {
       api
         .get(detailUrl({ section: "summary" }))
         .then((r) => {
-          // #region agent log
-          fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
-            body: JSON.stringify({
-              sessionId: "e69c79",
-              location: "AnalyticsDrillPanel.tsx:useEffect",
-              message: "detail summary loaded",
-              data: { kind: frame.kind, name: frame.name, count: r.data.summary?.count },
-              timestamp: Date.now(),
-              hypothesisId: "H-lazy-tabs",
-            }),
-          }).catch(() => {});
-          // #endregion
           setDetail(r.data);
         })
         .catch(() => setError("Could not load details."))
@@ -628,8 +546,12 @@ export function AnalyticsDrillPanel({
   }, [frame.kind, internTab, attPage, taskPage, loading, dossier?.intern.id]);
 
   useEffect(() => {
+    if ((frame.kind !== "college" && frame.kind !== "group") || loading || !detail || detail.charts) return;
+    void loadDetailCharts();
+  }, [frame.kind, loading, detail?.name, detail?.charts]);
+
+  useEffect(() => {
     if ((frame.kind !== "college" && frame.kind !== "group") || loading || !detail) return;
-    if (detailTab === "charts" && !detail.charts) void loadDetailCharts();
     if (detailTab === "students" && !detail.interns) void loadDetailStudents(studentsPage);
     if (detailTab === "related" && detail.relatedGroups === undefined && detail.relatedColleges === undefined) {
       void loadDetailRelated();
@@ -838,7 +760,6 @@ export function AnalyticsDrillPanel({
               {(
                 [
                   ["overview", "Overview"],
-                  ["charts", "Charts"],
                   ["students", `Students (${detail.summary.count})`],
                   ["related", detail.type === "college" ? "Groups" : "Colleges"],
                   ["work", "Recent work"],
@@ -861,16 +782,11 @@ export function AnalyticsDrillPanel({
               <p className="p-4 text-sm text-slate-500">Loading {detailTab}…</p>
             )}
 
-            {detailTab === "overview" && (
-              <div className="p-4 text-sm text-slate-600">
-                <p>
-                  Open <strong>Charts</strong>, <strong>Students</strong>, <strong>{detail.type === "college" ? "Groups" : "Colleges"}</strong>, or{" "}
-                  <strong>Recent work</strong> tabs to load details on demand — faster when data grows large.
-                </p>
-              </div>
+            {detailTab === "overview" && chartsLoading && !detail.charts && (
+              <p className="p-4 text-sm text-slate-500">Loading charts…</p>
             )}
 
-            {detailTab === "charts" && !tabLoading && detail.charts && (
+            {detailTab === "overview" && detail.charts && (
               <div className="space-y-4 p-4">
                 <div className="grid gap-4 lg:grid-cols-2">
                   <ChartCard title="Students comparison" subtitle="Click a student bar to open their profile">
