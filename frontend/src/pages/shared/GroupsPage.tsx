@@ -213,7 +213,7 @@ export function GroupsPage({ basePath }: { basePath: string }) {
     const next = g.internshipStatus === "COMPLETED" ? "ACTIVE" : "COMPLETED";
     const msg =
       next === "COMPLETED"
-        ? `Mark “${g.name}” internship COMPLETED? Members will be completed and attendance will lock.`
+        ? `Mark “${g.name}” COMPLETED? All active members will be marked completed — not hired unless you hire each one separately.`
         : `Reopen “${g.name}” internship?`;
     if (!confirm(msg)) return;
     await api.patch(`/groups/${g.id}/complete`, { internshipStatus: next });
@@ -312,7 +312,9 @@ export function GroupsPage({ basePath }: { basePath: string }) {
           onOpenIntern={openIntern}
           onOpenDay={(date) => pushDrill({ kind: "day", date })}
           canManageIntern={canEdit}
+          canManageGroup={canEdit}
           onInternUpdated={() => void loadGroups()}
+          onGroupUpdated={() => void loadGroups()}
         />
       </div>
     );

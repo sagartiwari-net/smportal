@@ -2,10 +2,15 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Pencil, Trash2, X } from "lucide-react";
 import { api } from "../../api/client";
 import { PageHeader } from "../../components/ui/PageHeader";
+import { useAuth } from "../../auth/AuthContext";
+import { AnalyticsDrillPanel, type DrillFrame } from "./analytics/AnalyticsDrillPanel";
 
 type College = { id: string; name: string; code?: string | null };
 
 export function CollegesPage() {
+  const { user } = useAuth();
+  const canManage = user?.role === "ADMIN" || user?.role === "HR" || user?.role === "TRAINER";
+
   const [colleges, setColleges] = useState<College[]>([]);
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
@@ -14,6 +19,25 @@ export function CollegesPage() {
   const [editCode, setEditCode] = useState("");
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
+
+  const [drill, setDrill] = useState<DrillFrame[]>([]);
+  const currentDrill = drill[drill.length - 1] ?? null;
+
+  function pushDrill(frame: DrillFrame) {
+    setDrill((d) => [...d, frame]);
+  }
+  function popDrill() {
+    setDrill((d) => d.slice(0, -1));
+  }
+  function openCollege(collegeName: string) {
+    pushDrill({ kind: "college", name: collegeName });
+  }
+  function openGroup(groupName: string) {
+    pushDrill({ kind: "group", name: groupName });
+  }
+  function openIntern(internId: string, label?: string) {
+    pushDrill({ kind: "intern", internId, label });
+  }
 
   async function load() {
     const { data } = await api.get("/colleges");
@@ -70,9 +94,28 @@ export function CollegesPage() {
     }
   }
 
+  if (currentDrill) {
+    return (
+      <div>
+        <PageHeader title="Colleges" subtitle="College analytics drill-down" />
+        <AnalyticsDrillPanel
+          frame={currentDrill}
+          filterQuery=""
+          onBack={popDrill}
+          onOpenCollege={openCollege}
+          onOpenGroup={openGroup}
+          onOpenIntern={openIntern}
+          onOpenDay={(date) => pushDrill({ kind: "day", date })}
+          canManageIntern={canManage}
+          canManageGroup={canManage}
+        />
+      </div>
+    );
+  }
+
   return (
     <div>
-      <PageHeader title="Colleges" subtitle="Add, edit, or remove colleges" />
+      <PageHeader title="Colleges" subtitle="Add, edit, or remove colleges · click a name for full details" />
       <form onSubmit={onSubmit} className="mb-6 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
         <input className="flex-1 rounded-lg border px-3 py-2.5 text-sm" placeholder="College name" required value={name} onChange={(e) => setName(e.target.value)} />
         <input className="rounded-lg border px-3 py-2.5 text-sm sm:w-40" placeholder="Code" value={code} onChange={(e) => setCode(e.target.value)} />
@@ -85,7 +128,13 @@ export function CollegesPage() {
         {colleges.map((c) => (
           <li key={c.id} className="flex items-center justify-between gap-3 rounded-xl border bg-white px-4 py-3 text-sm">
             <div className="min-w-0">
-              <span className="font-medium">{c.name}</span>
+              <button
+                type="button"
+                onClick={() => openCollege(c.name)}
+                className="font-medium text-green-800 underline-offset-2 hover:underline"
+              >
+                {c.name}
+              </button>
               {c.code ? <span className="ml-2 text-slate-500">({c.code})</span> : null}
             </div>
             <div className="flex shrink-0 gap-1">

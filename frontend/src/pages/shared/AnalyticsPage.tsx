@@ -4,6 +4,7 @@ import type { EChartsOption } from "echarts";
 import { api } from "../../api/client";
 import { downloadExcel } from "../../api/downloadExcel";
 import { PageHeader } from "../../components/ui/PageHeader";
+import { useAuth } from "../../auth/AuthContext";
 import { openAnalyticsPrintReport } from "../../lib/printAnalyticsReport";
 import { AnalyticsDrillPanel, type DrillFrame } from "./analytics/AnalyticsDrillPanel";
 
@@ -275,6 +276,8 @@ function buildQuery(f: FilterState, tab: TabId, page: number, pageSize: number) 
 }
 
 export function AnalyticsPage() {
+  const { user } = useAuth();
+  const canManage = user?.role === "ADMIN" || user?.role === "HR" || user?.role === "TRAINER";
   const [tab, setTab] = useState<TabId>("overview");
   const [page, setPage] = useState(1);
   const [pageSize] = useState(10);
@@ -691,6 +694,8 @@ export function AnalyticsPage() {
           onOpenGroup={(name) => pushDrill({ kind: "group", name })}
           onOpenIntern={openIntern}
           onOpenDay={openDay}
+          canManageIntern={canManage}
+          canManageGroup={canManage}
         />
       )}
 

@@ -244,6 +244,7 @@ async function assignTaskToInterns(taskId: string, title: string, forDate: Date,
           githubUrl: sibling.submission.githubUrl,
           liveUrl: sibling.submission.liveUrl,
           submittedAt: sibling.submission.submittedAt,
+          submitCount: sibling.submission.submitCount ?? 1,
         },
       });
     }

@@ -48,6 +48,7 @@ type RelatedAgg = {
 type DetailPayload = {
   type: "college" | "group";
   name: string;
+  groupMeta?: { id: string; name: string; internshipStatus: string } | null;
   summary: {
     count: number;
     avgScore: number;
@@ -56,15 +57,16 @@ type DetailPayload = {
     totalAssignments: number;
     totalAttendanceRows: number;
   };
-  charts: {
+  charts?: {
     taskStatus: Record<string, number>;
     attendanceTrend: { date: string; rate: number; present: number; total: number }[];
-    internBars: { name: string; fullName: string; score: number; attendance: number; tasks: number }[];
+    internBars: { internId: string; name: string; fullName: string; score: number; attendance: number; tasks: number }[];
   };
-  interns: InternRow[];
+  interns?: InternRow[];
+  studentsPagination?: Pagination & { pageSize?: number };
   relatedGroups?: RelatedAgg[];
   relatedColleges?: RelatedAgg[];
-  recentWork: {
+  recentWork?: {
     internId?: string;
     internName: string;
     email: string;
@@ -74,6 +76,7 @@ type DetailPayload = {
     status: string;
     forDate: string;
   }[];
+  workPagination?: Pagination & { pageSize?: number };
 };
 
 type DayPayload = {
@@ -132,8 +135,9 @@ type InternDossier = {
 };
 
 type InternTab = "overview" | "attendance" | "tasks";
+type DetailTab = "overview" | "charts" | "students" | "related" | "work";
 
-type Pagination = { page: number; limit: number; total: number; totalPages: number };
+type Pagination = { page: number; limit: number; pageSize?: number; total: number; totalPages: number };
 
 function TabPager({
   pagination,
@@ -219,6 +223,9 @@ type Props = {
   /** Show Complete / Reopen for intern dossier (Admin/HR/Trainer) */
   canManageIntern?: boolean;
   onInternUpdated?: () => void;
+  /** Show Complete / Reopen for group drill-down */
+  canManageGroup?: boolean;
+  onGroupUpdated?: () => void;
 };
 
 export function AnalyticsDrillPanel({
@@ -231,6 +238,8 @@ export function AnalyticsDrillPanel({
   onOpenDay,
   canManageIntern,
   onInternUpdated,
+  canManageGroup,
+  onGroupUpdated,
 }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -238,12 +247,17 @@ export function AnalyticsDrillPanel({
   const [day, setDay] = useState<DayPayload | null>(null);
   const [dossier, setDossier] = useState<InternDossier | null>(null);
   const [internTab, setInternTab] = useState<InternTab>("overview");
+  const [detailTab, setDetailTab] = useState<DetailTab>("overview");
   const [tabLoading, setTabLoading] = useState(false);
   const [attPage, setAttPage] = useState(1);
   const [taskPage, setTaskPage] = useState(1);
+  const [studentsPage, setStudentsPage] = useState(1);
+  const [workPage, setWorkPage] = useState(1);
   const [pageLimit] = useState(20);
+  const [detailPageSize] = useState(20);
   const [exporting, setExporting] = useState(false);
   const [statusBusy, setStatusBusy] = useState(false);
+  const [hireNote, setHireNote] = useState("");
   /** Bumps on each frame change — stale tab fetches are ignored */
   const loadEpochRef = useRef(0);
 
@@ -255,6 +269,141 @@ export function AnalyticsDrillPanel({
     },
     [frame],
   );
+
+  const detailUrl = useCallback(
+    (params: Record<string, string | number>) => {
+      if (frame.kind !== "college" && frame.kind !== "group") return "";
+      const qs = new URLSearchParams({
+        type: frame.kind,
+        name: frame.name,
+        ...Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])),
+      });
+      const base = `/analytics/detail?${qs}`;
+      return filterQuery ? `${base}&${filterQuery}` : base;
+    },
+    [frame, filterQuery],
+  );
+
+  async function reloadDetailSummary() {
+    if (frame.kind !== "college" && frame.kind !== "group") return;
+    const r = await api.get(detailUrl({ section: "summary" }));
+    setDetail((prev) => ({
+      ...r.data,
+      charts: prev?.charts,
+      interns: prev?.interns,
+      studentsPagination: prev?.studentsPagination,
+      relatedGroups: prev?.relatedGroups,
+      relatedColleges: prev?.relatedColleges,
+      recentWork: prev?.recentWork,
+      workPagination: prev?.workPagination,
+    }));
+  }
+
+  async function loadDetailCharts() {
+    if (frame.kind !== "college" && frame.kind !== "group") return;
+    const epoch = loadEpochRef.current;
+    setTabLoading(true);
+    try {
+      const r = await api.get(detailUrl({ section: "charts" }));
+      if (epoch !== loadEpochRef.current) return;
+      // #region agent log
+      fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
+        body: JSON.stringify({
+          sessionId: "e69c79",
+          location: "AnalyticsDrillPanel.tsx:loadDetailCharts",
+          message: "detail section loaded",
+          data: { section: "charts", kind: frame.kind, name: frame.name },
+          timestamp: Date.now(),
+          hypothesisId: "H-lazy-tabs",
+        }),
+      }).catch(() => {});
+      // #endregion
+      setDetail((prev) => (prev ? { ...prev, charts: r.data.charts, summary: r.data.summary ?? prev.summary } : r.data));
+    } catch {
+      if (epoch === loadEpochRef.current) setError("Could not load charts.");
+    } finally {
+      if (epoch === loadEpochRef.current) setTabLoading(false);
+    }
+  }
+
+  async function loadDetailStudents(page = studentsPage) {
+    if (frame.kind !== "college" && frame.kind !== "group") return;
+    const epoch = loadEpochRef.current;
+    setTabLoading(true);
+    try {
+      const r = await api.get(detailUrl({ section: "students", page, pageSize: detailPageSize }));
+      if (epoch !== loadEpochRef.current) return;
+      // #region agent log
+      fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
+        body: JSON.stringify({
+          sessionId: "e69c79",
+          location: "AnalyticsDrillPanel.tsx:loadDetailStudents",
+          message: "detail section loaded",
+          data: { section: "students", page, count: r.data.interns?.length ?? 0 },
+          timestamp: Date.now(),
+          hypothesisId: "H-lazy-tabs",
+        }),
+      }).catch(() => {});
+      // #endregion
+      setDetail((prev) =>
+        prev
+          ? { ...prev, interns: r.data.interns, studentsPagination: r.data.studentsPagination }
+          : r.data,
+      );
+    } catch {
+      if (epoch === loadEpochRef.current) setError("Could not load students.");
+    } finally {
+      if (epoch === loadEpochRef.current) setTabLoading(false);
+    }
+  }
+
+  async function loadDetailRelated() {
+    if (frame.kind !== "college" && frame.kind !== "group") return;
+    const epoch = loadEpochRef.current;
+    setTabLoading(true);
+    try {
+      const r = await api.get(detailUrl({ section: "related" }));
+      if (epoch !== loadEpochRef.current) return;
+      setDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              relatedGroups: r.data.relatedGroups ?? [],
+              relatedColleges: r.data.relatedColleges ?? [],
+            }
+          : {
+              ...r.data,
+              relatedGroups: r.data.relatedGroups ?? [],
+              relatedColleges: r.data.relatedColleges ?? [],
+            },
+      );
+    } catch {
+      if (epoch === loadEpochRef.current) setError("Could not load related list.");
+    } finally {
+      if (epoch === loadEpochRef.current) setTabLoading(false);
+    }
+  }
+
+  async function loadDetailWork(page = workPage) {
+    if (frame.kind !== "college" && frame.kind !== "group") return;
+    const epoch = loadEpochRef.current;
+    setTabLoading(true);
+    try {
+      const r = await api.get(detailUrl({ section: "work", page, pageSize: detailPageSize }));
+      if (epoch !== loadEpochRef.current) return;
+      setDetail((prev) =>
+        prev ? { ...prev, recentWork: r.data.recentWork, workPagination: r.data.workPagination } : r.data,
+      );
+    } catch {
+      if (epoch === loadEpochRef.current) setError("Could not load recent work.");
+    } finally {
+      if (epoch === loadEpochRef.current) setTabLoading(false);
+    }
+  }
 
   async function reloadDossierSummary() {
     if (frame.kind !== "intern") return;
@@ -312,11 +461,25 @@ export function AnalyticsDrillPanel({
     const next = dossier.intern.internshipStatus === "COMPLETED" ? "ACTIVE" : "COMPLETED";
     const msg =
       next === "COMPLETED"
-        ? `Mark ${dossier.intern.fullName}'s internship COMPLETED?`
+        ? `Mark ${dossier.intern.fullName}'s internship COMPLETED? (Hired status stays separate.)`
         : `Reopen ${dossier.intern.fullName}'s internship?`;
     if (!confirm(msg)) return;
     setStatusBusy(true);
     try {
+      // #region agent log
+      fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
+        body: JSON.stringify({
+          sessionId: "e69c79",
+          location: "AnalyticsDrillPanel.tsx:toggleInternComplete",
+          message: "intern status patch",
+          data: { internshipStatus: next, isHired: dossier.intern.isHired },
+          timestamp: Date.now(),
+          hypothesisId: "H-separate-hire",
+        }),
+      }).catch(() => {});
+      // #endregion
       await api.patch(`/interns/${frame.internId}/status`, { internshipStatus: next });
       await reloadDossierSummary();
       if (internTab === "attendance") void loadAttendanceTab(attPage);
@@ -324,6 +487,77 @@ export function AnalyticsDrillPanel({
       onInternUpdated?.();
     } catch {
       setError("Could not update internship status.");
+    } finally {
+      setStatusBusy(false);
+    }
+  }
+
+  async function toggleInternHired() {
+    if (frame.kind !== "intern" || !dossier) return;
+    const next = !dossier.intern.isHired;
+    const msg = next
+      ? `Mark ${dossier.intern.fullName} as hired? (Only this intern — not the whole group.)`
+      : `Remove hired status from ${dossier.intern.fullName}?`;
+    if (!confirm(msg)) return;
+    setStatusBusy(true);
+    try {
+      // #region agent log
+      fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
+        body: JSON.stringify({
+          sessionId: "e69c79",
+          location: "AnalyticsDrillPanel.tsx:toggleInternHired",
+          message: "intern hire patch",
+          data: { isHired: next, internshipStatus: dossier.intern.internshipStatus },
+          timestamp: Date.now(),
+          hypothesisId: "H-separate-hire",
+        }),
+      }).catch(() => {});
+      // #endregion
+      await api.patch(`/interns/${frame.internId}/status`, {
+        isHired: next,
+        hireNote: next ? hireNote.trim() || undefined : undefined,
+      });
+      await reloadDossierSummary();
+      onInternUpdated?.();
+    } catch {
+      setError("Could not update hired status.");
+    } finally {
+      setStatusBusy(false);
+    }
+  }
+
+  async function toggleGroupComplete() {
+    if (frame.kind !== "group" || !detail?.groupMeta) return;
+    const g = detail.groupMeta;
+    const next = g.internshipStatus === "COMPLETED" ? "ACTIVE" : "COMPLETED";
+    const msg =
+      next === "COMPLETED"
+        ? `Mark “${g.name}” COMPLETED? All active members will be marked completed — not hired unless you hire each one separately.`
+        : `Reopen “${g.name}”?`;
+    if (!confirm(msg)) return;
+    setStatusBusy(true);
+    try {
+      // #region agent log
+      fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
+        body: JSON.stringify({
+          sessionId: "e69c79",
+          location: "AnalyticsDrillPanel.tsx:toggleGroupComplete",
+          message: "group complete patch",
+          data: { groupId: g.id, internshipStatus: next },
+          timestamp: Date.now(),
+          hypothesisId: "H-group-complete",
+        }),
+      }).catch(() => {});
+      // #endregion
+      await api.patch(`/groups/${g.id}/complete`, { internshipStatus: next });
+      await reloadDetailSummary();
+      onGroupUpdated?.();
+    } catch {
+      setError("Could not update group status.");
     } finally {
       setStatusBusy(false);
     }
@@ -337,14 +571,34 @@ export function AnalyticsDrillPanel({
     setDay(null);
     setDossier(null);
     setInternTab("overview");
+    setDetailTab("overview");
     setAttPage(1);
     setTaskPage(1);
+    setStudentsPage(1);
+    setWorkPage(1);
     setTabLoading(false);
+    setHireNote("");
 
     if (frame.kind === "college" || frame.kind === "group") {
       api
-        .get(`/analytics/detail?type=${encodeURIComponent(frame.kind)}&name=${encodeURIComponent(frame.name)}`)
-        .then((r) => setDetail(r.data))
+        .get(detailUrl({ section: "summary" }))
+        .then((r) => {
+          // #region agent log
+          fetch("http://127.0.0.1:7300/ingest/eabdbff4-910b-4e9a-93be-a8f89536775f", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e69c79" },
+            body: JSON.stringify({
+              sessionId: "e69c79",
+              location: "AnalyticsDrillPanel.tsx:useEffect",
+              message: "detail summary loaded",
+              data: { kind: frame.kind, name: frame.name, count: r.data.summary?.count },
+              timestamp: Date.now(),
+              hypothesisId: "H-lazy-tabs",
+            }),
+          }).catch(() => {});
+          // #endregion
+          setDetail(r.data);
+        })
         .catch(() => setError("Could not load details."))
         .finally(() => setLoading(false));
       return;
@@ -365,7 +619,7 @@ export function AnalyticsDrillPanel({
       .then((r) => setDossier(r.data))
       .catch(() => setError("Could not load student details."))
       .finally(() => setLoading(false));
-  }, [frame, filterQuery]);
+  }, [frame, filterQuery, detailUrl]);
 
   useEffect(() => {
     if (frame.kind !== "intern" || loading || !dossier) return;
@@ -373,8 +627,28 @@ export function AnalyticsDrillPanel({
     if (internTab === "tasks") void loadTasksTab(taskPage);
   }, [frame.kind, internTab, attPage, taskPage, loading, dossier?.intern.id]);
 
+  useEffect(() => {
+    if ((frame.kind !== "college" && frame.kind !== "group") || loading || !detail) return;
+    if (detailTab === "charts" && !detail.charts) void loadDetailCharts();
+    if (detailTab === "students" && !detail.interns) void loadDetailStudents(studentsPage);
+    if (detailTab === "related" && detail.relatedGroups === undefined && detail.relatedColleges === undefined) {
+      void loadDetailRelated();
+    }
+    if (detailTab === "work" && !detail.recentWork) void loadDetailWork(workPage);
+  }, [frame.kind, detailTab, studentsPage, workPage, loading, detail?.name]);
+
+  useEffect(() => {
+    if ((frame.kind !== "college" && frame.kind !== "group") || detailTab !== "students" || !detail?.interns) return;
+    void loadDetailStudents(studentsPage);
+  }, [studentsPage]);
+
+  useEffect(() => {
+    if ((frame.kind !== "college" && frame.kind !== "group") || detailTab !== "work" || !detail?.recentWork) return;
+    void loadDetailWork(workPage);
+  }, [workPage]);
+
   const detailBarsOption = useMemo<EChartsOption>(() => {
-    const bars = detail?.charts.internBars ?? [];
+    const bars = detail?.charts?.internBars ?? [];
     return {
       tooltip: { trigger: "axis" },
       legend: { top: 0 },
@@ -387,10 +661,10 @@ export function AnalyticsDrillPanel({
         { name: "Tasks", type: "bar", data: bars.map((t) => t.tasks), itemStyle: { color: SKY } },
       ],
     };
-  }, [detail?.charts.internBars]);
+  }, [detail?.charts?.internBars]);
 
   const detailTaskOption = useMemo<EChartsOption>(() => {
-    const ts = detail?.charts.taskStatus ?? {};
+    const ts = detail?.charts?.taskStatus ?? {};
     return {
       tooltip: { trigger: "item" },
       legend: { bottom: 0 },
@@ -410,10 +684,10 @@ export function AnalyticsDrillPanel({
         },
       ],
     };
-  }, [detail?.charts.taskStatus]);
+  }, [detail?.charts?.taskStatus]);
 
   const detailTrendOption = useMemo<EChartsOption>(() => {
-    const trend = detail?.charts.attendanceTrend ?? [];
+    const trend = detail?.charts?.attendanceTrend ?? [];
     return {
       tooltip: { trigger: "axis" },
       grid: { left: 40, right: 16, top: 24, bottom: 40 },
@@ -430,7 +704,7 @@ export function AnalyticsDrillPanel({
         },
       ],
     };
-  }, [detail?.charts.attendanceTrend]);
+  }, [detail?.charts?.attendanceTrend]);
 
   async function exportCurrent() {
     setExporting(true);
@@ -474,8 +748,9 @@ export function AnalyticsDrillPanel({
           <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
           {detail && (
             <p className="text-sm text-slate-500">
-              {detail.summary.count} students · avg score {detail.summary.avgScore}% · {detail.summary.totalAssignments}{" "}
-              task assignments
+              {detail.summary.count} students · avg score {detail.summary.avgScore}%
+              {detail.summary.totalAssignments != null ? ` · ${detail.summary.totalAssignments} task assignments` : ""}
+              {detail.groupMeta?.internshipStatus === "COMPLETED" ? " · Group completed" : ""}
             </p>
           )}
           {day && (
@@ -492,15 +767,35 @@ export function AnalyticsDrillPanel({
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {canManageIntern && frame.kind === "intern" && dossier && (
+          {canManageGroup && frame.kind === "group" && detail?.groupMeta && (
             <button
               type="button"
               disabled={statusBusy || loading}
-              onClick={() => void toggleInternComplete()}
+              onClick={() => void toggleGroupComplete()}
               className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
             >
-              {dossier.intern.internshipStatus === "COMPLETED" ? "Reopen internship" : "Mark internship complete"}
+              {detail.groupMeta.internshipStatus === "COMPLETED" ? "Reopen group" : "Mark group complete"}
             </button>
+          )}
+          {canManageIntern && frame.kind === "intern" && dossier && (
+            <>
+              <button
+                type="button"
+                disabled={statusBusy || loading}
+                onClick={() => void toggleInternComplete()}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                {dossier.intern.internshipStatus === "COMPLETED" ? "Reopen internship" : "Mark internship complete"}
+              </button>
+              <button
+                type="button"
+                disabled={statusBusy || loading}
+                onClick={() => void toggleInternHired()}
+                className="rounded-lg border border-sky-300 px-3 py-2 text-sm font-medium text-sky-800 hover:bg-sky-50 disabled:opacity-50"
+              >
+                {dossier.intern.isHired ? "Remove hired" : "Mark as hired"}
+              </button>
+            </>
           )}
           <button
             type="button"
@@ -532,143 +827,245 @@ export function AnalyticsDrillPanel({
             ))}
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-2">
-            <ChartCard title="Students comparison" subtitle="Click a student bar to open their profile">
-              <ReactECharts
-                option={detailBarsOption}
-                style={{ height: 280 }}
-                onEvents={{
-                  click: (params: { dataIndex?: number }) => {
-                    const idx = params.dataIndex;
-                    if (idx == null) return;
-                    const row = detail.interns[idx];
-                    if (row) onOpenIntern(row.internId, row.fullName);
-                  },
-                }}
-              />
-            </ChartCard>
-            <ChartCard title="Task status in this set" subtitle="Done vs pending work">
-              <ReactECharts option={detailTaskOption} style={{ height: 280 }} />
-            </ChartCard>
-          </div>
-
-          <ChartCard title="Attendance trend" subtitle="Click a date point to open that day's roster">
-            <ReactECharts
-              option={detailTrendOption}
-              style={{ height: 240 }}
-              onEvents={{
-                click: (params: { dataIndex?: number }) => {
-                  const idx = params.dataIndex;
-                  if (idx == null) return;
-                  const point = detail.charts.attendanceTrend[idx];
-                  if (point?.date) onOpenDay(point.date.slice(0, 10));
-                },
-              }}
-            />
-          </ChartCard>
-
-          {detail.type === "college" && (detail.relatedGroups?.length ?? 0) > 0 && (
-            <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-              <div className="border-b bg-slate-50 px-4 py-3">
-                <p className="text-sm font-semibold text-slate-800">Groups in this college</p>
-                <p className="text-xs text-slate-500">Click a group to open its students</p>
-              </div>
-              <table className="min-w-full text-left text-sm">
-                <thead className="border-b text-slate-500">
-                  <tr>
-                    <th className="px-4 py-3">Group</th>
-                    <th className="px-4 py-3">Students</th>
-                    <th className="px-4 py-3">Avg score</th>
-                    <th className="px-4 py-3">Avg attendance</th>
-                    <th className="px-4 py-3">Avg tasks</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {detail.relatedGroups!.map((g) => (
-                    <tr key={g.name} className="border-b last:border-0 hover:bg-green-50/70">
-                      <td className="px-4 py-2.5">{linkBtn(g.name, () => onOpenGroup(g.name))}</td>
-                      <td className="px-4 py-2.5">{g.students}</td>
-                      <td className="px-4 py-2.5">{g.avgScore}%</td>
-                      <td className="px-4 py-2.5">{g.avgAttendance}%</td>
-                      <td className="px-4 py-2.5">{g.avgTasks}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          {detail.groupMeta?.internshipStatus === "COMPLETED" && (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+              Group internship completed — members are marked completed but not auto-hired. Hire each intern individually if needed.
             </div>
           )}
 
-          {detail.type === "group" && (detail.relatedColleges?.length ?? 0) > 0 && (
-            <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-              <div className="border-b bg-slate-50 px-4 py-3">
-                <p className="text-sm font-semibold text-slate-800">Colleges in this group</p>
-                <p className="text-xs text-slate-500">Click a college to open its students</p>
-              </div>
-              <table className="min-w-full text-left text-sm">
-                <thead className="border-b text-slate-500">
-                  <tr>
-                    <th className="px-4 py-3">College</th>
-                    <th className="px-4 py-3">Students</th>
-                    <th className="px-4 py-3">Avg score</th>
-                    <th className="px-4 py-3">Avg attendance</th>
-                    <th className="px-4 py-3">Avg tasks</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {detail.relatedColleges!.map((c) => (
-                    <tr key={c.name} className="border-b last:border-0 hover:bg-green-50/70">
-                      <td className="px-4 py-2.5">{linkBtn(c.name, () => onOpenCollege(c.name))}</td>
-                      <td className="px-4 py-2.5">{c.students}</td>
-                      <td className="px-4 py-2.5">{c.avgScore}%</td>
-                      <td className="px-4 py-2.5">{c.avgAttendance}%</td>
-                      <td className="px-4 py-2.5">{c.avgTasks}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+            <div className="flex flex-wrap gap-1 border-b bg-slate-50 p-2">
+              {(
+                [
+                  ["overview", "Overview"],
+                  ["charts", "Charts"],
+                  ["students", `Students (${detail.summary.count})`],
+                  ["related", detail.type === "college" ? "Groups" : "Colleges"],
+                  ["work", "Recent work"],
+                ] as [DetailTab, string][]
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setDetailTab(id)}
+                  className={`rounded-lg px-3 py-2 text-sm font-medium ${
+                    detailTab === id ? "bg-green-600 text-white" : "text-slate-600 hover:bg-white"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
-          )}
 
-          <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-            <div className="border-b bg-slate-50 px-4 py-3">
-              <p className="text-sm font-semibold text-slate-800">Students in {detail.name}</p>
-              <p className="text-xs text-slate-500">Click name / college / group to drill further</p>
-            </div>
-            <table className="min-w-full text-left text-sm">
-              <thead className="border-b text-slate-500">
-                <tr>
-                  <th className="px-4 py-3">#</th>
-                  <th className="px-4 py-3">Name</th>
-                  <th className="px-4 py-3">College</th>
-                  <th className="px-4 py-3">Group</th>
-                  <th className="px-4 py-3">Attendance</th>
-                  <th className="px-4 py-3">Tasks</th>
-                  <th className="px-4 py-3">Score</th>
-                </tr>
-              </thead>
-              <tbody>
-                {detail.interns.map((r, i) => (
-                  <tr key={r.internId} className="border-b last:border-0 hover:bg-slate-50/80">
-                    <td className="px-4 py-3 text-slate-400">{i + 1}</td>
-                    <td className="px-4 py-3">
-                      {linkBtn(r.fullName, () => onOpenIntern(r.internId, r.fullName))}
-                      <div className="text-xs text-slate-400">{r.email}</div>
-                    </td>
-                    <td className="px-4 py-3">
-                      {r.college ? linkBtn(r.college, () => onOpenCollege(r.college!)) : "—"}
-                    </td>
-                    <td className="px-4 py-3">
-                      {r.groupName ? linkBtn(r.groupName, () => onOpenGroup(r.groupName!)) : "—"}
-                    </td>
-                    <td className="px-4 py-3">{r.attendanceRate}%</td>
-                    <td className="px-4 py-3">
-                      {r.doneTasks}/{r.totalTasks} ({r.taskCompletionRate}%)
-                    </td>
-                    <td className="px-4 py-3 font-semibold text-green-700">{r.score}%</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            {tabLoading && detailTab !== "overview" && (
+              <p className="p-4 text-sm text-slate-500">Loading {detailTab}…</p>
+            )}
+
+            {detailTab === "overview" && (
+              <div className="p-4 text-sm text-slate-600">
+                <p>
+                  Open <strong>Charts</strong>, <strong>Students</strong>, <strong>{detail.type === "college" ? "Groups" : "Colleges"}</strong>, or{" "}
+                  <strong>Recent work</strong> tabs to load details on demand — faster when data grows large.
+                </p>
+              </div>
+            )}
+
+            {detailTab === "charts" && !tabLoading && detail.charts && (
+              <div className="space-y-4 p-4">
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <ChartCard title="Students comparison" subtitle="Click a student bar to open their profile">
+                    <ReactECharts
+                      option={detailBarsOption}
+                      style={{ height: 280 }}
+                      onEvents={{
+                        click: (params: { dataIndex?: number }) => {
+                          const idx = params.dataIndex;
+                          if (idx == null) return;
+                          const bar = detail.charts!.internBars[idx];
+                          if (bar?.internId) onOpenIntern(bar.internId, bar.fullName);
+                        },
+                      }}
+                    />
+                  </ChartCard>
+                  <ChartCard title="Task status in this set" subtitle="Done vs pending work">
+                    <ReactECharts option={detailTaskOption} style={{ height: 280 }} />
+                  </ChartCard>
+                </div>
+                <ChartCard title="Attendance trend" subtitle="Click a date point to open that day's roster">
+                  <ReactECharts
+                    option={detailTrendOption}
+                    style={{ height: 240 }}
+                    onEvents={{
+                      click: (params: { dataIndex?: number }) => {
+                        const idx = params.dataIndex;
+                        if (idx == null) return;
+                        const point = detail.charts!.attendanceTrend[idx];
+                        if (point?.date) onOpenDay(point.date.slice(0, 10));
+                      },
+                    }}
+                  />
+                </ChartCard>
+              </div>
+            )}
+
+            {detailTab === "students" && !tabLoading && detail.interns && (
+              <>
+                <table className="min-w-full text-left text-sm">
+                  <thead className="border-b text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3">#</th>
+                      <th className="px-4 py-3">Name</th>
+                      <th className="px-4 py-3">College</th>
+                      <th className="px-4 py-3">Group</th>
+                      <th className="px-4 py-3">Attendance</th>
+                      <th className="px-4 py-3">Tasks</th>
+                      <th className="px-4 py-3">Score</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detail.interns.map((r, i) => (
+                      <tr key={r.internId} className="border-b last:border-0 hover:bg-slate-50/80">
+                        <td className="px-4 py-3 text-slate-400">
+                          {((detail.studentsPagination?.page ?? 1) - 1) * (detail.studentsPagination?.pageSize ?? detailPageSize) + i + 1}
+                        </td>
+                        <td className="px-4 py-3">
+                          {linkBtn(r.fullName, () => onOpenIntern(r.internId, r.fullName))}
+                          <div className="text-xs text-slate-400">{r.email}</div>
+                        </td>
+                        <td className="px-4 py-3">
+                          {r.college ? linkBtn(r.college, () => onOpenCollege(r.college!)) : "—"}
+                        </td>
+                        <td className="px-4 py-3">
+                          {r.groupName ? linkBtn(r.groupName, () => onOpenGroup(r.groupName!)) : "—"}
+                        </td>
+                        <td className="px-4 py-3">{r.attendanceRate}%</td>
+                        <td className="px-4 py-3">
+                          {r.doneTasks}/{r.totalTasks} ({r.taskCompletionRate}%)
+                        </td>
+                        <td className="px-4 py-3 font-semibold text-green-700">{r.score}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {detail.interns.length === 0 && (
+                  <p className="p-4 text-sm text-slate-500">No students in this {detail.type}.</p>
+                )}
+                {detail.studentsPagination && (
+                  <TabPager
+                    pagination={{
+                      page: detail.studentsPagination.page,
+                      limit: detail.studentsPagination.pageSize ?? detail.studentsPagination.limit ?? detailPageSize,
+                      total: detail.studentsPagination.total,
+                      totalPages: detail.studentsPagination.totalPages,
+                    }}
+                    onChange={setStudentsPage}
+                  />
+                )}
+              </>
+            )}
+
+            {detailTab === "related" && !tabLoading && (
+              <>
+                {detail.type === "college" && (detail.relatedGroups?.length ?? 0) > 0 && (
+                  <table className="min-w-full text-left text-sm">
+                    <thead className="border-b text-slate-500">
+                      <tr>
+                        <th className="px-4 py-3">Group</th>
+                        <th className="px-4 py-3">Students</th>
+                        <th className="px-4 py-3">Avg score</th>
+                        <th className="px-4 py-3">Avg attendance</th>
+                        <th className="px-4 py-3">Avg tasks</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.relatedGroups!.map((g) => (
+                        <tr key={g.name} className="border-b last:border-0 hover:bg-green-50/70">
+                          <td className="px-4 py-2.5">{linkBtn(g.name, () => onOpenGroup(g.name))}</td>
+                          <td className="px-4 py-2.5">{g.students}</td>
+                          <td className="px-4 py-2.5">{g.avgScore}%</td>
+                          <td className="px-4 py-2.5">{g.avgAttendance}%</td>
+                          <td className="px-4 py-2.5">{g.avgTasks}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                {detail.type === "group" && (detail.relatedColleges?.length ?? 0) > 0 && (
+                  <table className="min-w-full text-left text-sm">
+                    <thead className="border-b text-slate-500">
+                      <tr>
+                        <th className="px-4 py-3">College</th>
+                        <th className="px-4 py-3">Students</th>
+                        <th className="px-4 py-3">Avg score</th>
+                        <th className="px-4 py-3">Avg attendance</th>
+                        <th className="px-4 py-3">Avg tasks</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.relatedColleges!.map((c) => (
+                        <tr key={c.name} className="border-b last:border-0 hover:bg-green-50/70">
+                          <td className="px-4 py-2.5">{linkBtn(c.name, () => onOpenCollege(c.name))}</td>
+                          <td className="px-4 py-2.5">{c.students}</td>
+                          <td className="px-4 py-2.5">{c.avgScore}%</td>
+                          <td className="px-4 py-2.5">{c.avgAttendance}%</td>
+                          <td className="px-4 py-2.5">{c.avgTasks}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                {((detail.type === "college" && !(detail.relatedGroups?.length ?? 0)) ||
+                  (detail.type === "group" && !(detail.relatedColleges?.length ?? 0))) && (
+                  <p className="p-4 text-sm text-slate-500">No related {detail.type === "college" ? "groups" : "colleges"} found.</p>
+                )}
+              </>
+            )}
+
+            {detailTab === "work" && !tabLoading && detail.recentWork && (
+              <>
+                <table className="min-w-full text-left text-sm">
+                  <thead className="border-b text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3">Student</th>
+                      <th className="px-4 py-3">Task</th>
+                      <th className="px-4 py-3">For date</th>
+                      <th className="px-4 py-3">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detail.recentWork.map((w, i) => (
+                      <tr key={`${w.internId}-${w.forDate}-${i}`} className="border-b last:border-0 hover:bg-slate-50/80">
+                        <td className="px-4 py-3">
+                          {w.internId
+                            ? linkBtn(w.internName, () => onOpenIntern(w.internId!, w.internName))
+                            : w.internName}
+                          <div className="text-xs text-slate-400">{w.email}</div>
+                        </td>
+                        <td className="px-4 py-3">
+                          Day {w.dayNumber} · Task {w.taskNumber}: {w.title}
+                        </td>
+                        <td className="px-4 py-3">{String(w.forDate).slice(0, 10)}</td>
+                        <td className="px-4 py-3">{statusBadge(w.status)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {detail.recentWork.length === 0 && (
+                  <p className="p-4 text-sm text-slate-500">No task assignments yet.</p>
+                )}
+                {detail.workPagination && (
+                  <TabPager
+                    pagination={{
+                      page: detail.workPagination.page,
+                      limit: detail.workPagination.pageSize ?? detail.workPagination.limit ?? detailPageSize,
+                      total: detail.workPagination.total,
+                      totalPages: detail.workPagination.totalPages,
+                    }}
+                    onChange={setWorkPage}
+                  />
+                )}
+              </>
+            )}
           </div>
         </>
       )}
@@ -754,13 +1151,39 @@ export function AnalyticsDrillPanel({
                 </p>
               </div>
               <div>
-                <p className="text-xs uppercase text-slate-500">Status</p>
-                <p className="font-medium">
+                <p className="text-xs uppercase text-slate-500">Internship</p>
+                <span
+                  className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                    dossier.intern.internshipStatus === "COMPLETED"
+                      ? "bg-slate-200 text-slate-700"
+                      : "bg-green-100 text-green-800"
+                  }`}
+                >
                   {dossier.intern.internshipStatus}
-                  {dossier.intern.isHired ? " · Hired" : ""}
-                </p>
+                </span>
+              </div>
+              <div>
+                <p className="text-xs uppercase text-slate-500">Hired</p>
+                <span
+                  className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                    dossier.intern.isHired ? "bg-sky-100 text-sky-800" : "bg-slate-100 text-slate-600"
+                  }`}
+                >
+                  {dossier.intern.isHired ? "Yes" : "No"}
+                </span>
               </div>
             </div>
+            {canManageIntern && !dossier.intern.isHired && (
+              <div className="mt-3 border-t pt-3">
+                <label className="text-xs text-slate-500">Optional hire note (used when you mark as hired)</label>
+                <input
+                  className="mt-1 w-full max-w-md rounded-lg border px-3 py-2 text-sm"
+                  placeholder="e.g. Full-time offer · role"
+                  value={hireNote}
+                  onChange={(e) => setHireNote(e.target.value)}
+                />
+              </div>
+            )}
           </div>
 
           {dossier.intern.internshipStatus === "COMPLETED" && (

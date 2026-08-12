@@ -593,8 +593,8 @@ router.get("/dashboard", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async
 });
 
 /**
- * Drill-down: college or group detail with interns, tasks, attendance charts.
- * Query: type=college|group&name=Demo College
+ * Drill-down: college or group detail — lazy sections for faster load.
+ * Query: type=college|group&name=…&section=summary|charts|students|related|work|all&page&pageSize
  */
 router.get("/detail", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async (req, res) => {
   const type = typeof req.query.type === "string" ? req.query.type : "";
@@ -602,6 +602,13 @@ router.get("/detail", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async (r
   if ((type !== "college" && type !== "group") || !name) {
     return res.status(400).json({ message: "type=college|group and name are required" });
   }
+
+  const sectionRaw = typeof req.query.section === "string" ? req.query.section : "summary";
+  const section = ["summary", "charts", "students", "related", "work", "all"].includes(sectionRaw)
+    ? sectionRaw
+    : "summary";
+  const page = Math.max(1, parseNum(req.query.page) ?? 1);
+  const pageSize = Math.min(50, Math.max(10, parseNum(req.query.pageSize) ?? 20));
 
   const interns = await scopedInterns(req.user!.id, req.user!.role);
   const allRows = await buildRows(interns);
@@ -611,97 +618,159 @@ router.get("/detail", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async (r
   const sorted = sortRows(scoped, "score_desc");
   const internIds = sorted.map((r) => r.internId);
 
-  const assignments = internIds.length
-    ? await prisma.taskAssignment.findMany({
-        where: { internId: { in: internIds } },
-        include: {
-          task: { select: { title: true } },
-          intern: { include: { user: { select: { fullName: true, email: true } } } },
-        },
-        orderBy: [{ forDate: "desc" }, { taskNumber: "asc" }],
-      })
-    : [];
+  let groupMeta: { id: string; name: string; internshipStatus: string } | null = null;
+  if (type === "group") {
+    const g = await prisma.trainingGroup.findFirst({ where: { name, isActive: true } });
+    if (g) groupMeta = { id: g.id, name: g.name, internshipStatus: g.internshipStatus };
+  }
 
-  const taskStatus = { ASSIGNED: 0, SUBMITTED: 0, NEEDS_IMPROVEMENT: 0, DONE: 0 };
-  for (const a of assignments) taskStatus[a.status] += 1;
+  const base = {
+    type,
+    name,
+    groupMeta,
+    summary: summaryFromRows(sorted),
+  };
 
-  // Per-intern work snapshot
-  const workByIntern = new Map<
-    string,
-    { done: number; submitted: number; needs: number; assigned: number; titles: string[] }
-  >();
-  for (const a of assignments) {
-    const cur = workByIntern.get(a.internId) || {
-      done: 0,
-      submitted: 0,
-      needs: 0,
-      assigned: 0,
-      titles: [],
-    };
-    if (a.status === "DONE") cur.done += 1;
-    else if (a.status === "SUBMITTED") cur.submitted += 1;
-    else if (a.status === "NEEDS_IMPROVEMENT") cur.needs += 1;
-    else cur.assigned += 1;
-    if (cur.titles.length < 4) {
-      cur.titles.push(`Day ${a.dayNumber} · Task ${a.taskNumber}: ${a.task.title} (${a.status})`);
+  const wantAll = section === "all";
+  const wantCharts = section === "charts" || wantAll;
+  const wantStudents = section === "students" || wantAll;
+  const wantRelated = section === "related" || wantAll;
+  const wantWork = section === "work" || wantAll;
+
+  if (section === "summary") {
+    return res.json(base);
+  }
+
+  let assignments: Awaited<ReturnType<typeof prisma.taskAssignment.findMany>> = [];
+  if (wantCharts || wantStudents || wantWork) {
+    assignments = internIds.length
+      ? await prisma.taskAssignment.findMany({
+          where: { internId: { in: internIds } },
+          include: {
+            task: { select: { title: true } },
+            intern: { include: { user: { select: { fullName: true, email: true } } } },
+          },
+          orderBy: [{ forDate: "desc" }, { taskNumber: "asc" }],
+        })
+      : [];
+  }
+
+  let charts: {
+    taskStatus: Record<string, number>;
+    attendanceTrend: { date: string; rate: number; present: number; total: number }[];
+    internBars: { internId: string; name: string; fullName: string; score: number; attendance: number; tasks: number }[];
+  } | undefined;
+
+  if (wantCharts) {
+    const taskStatus = { ASSIGNED: 0, SUBMITTED: 0, NEEDS_IMPROVEMENT: 0, DONE: 0 };
+    for (const a of assignments) taskStatus[a.status] += 1;
+
+    const attendance = internIds.length
+      ? await prisma.attendance.findMany({
+          where: { internId: { in: internIds } },
+          select: { status: true, date: true },
+          orderBy: { date: "asc" },
+        })
+      : [];
+
+    const byDate = new Map<string, { present: number; counted: number }>();
+    for (const a of attendance) {
+      if (a.status === "WEEK_OFF") continue;
+      const key = a.date.toISOString().slice(0, 10);
+      const cur = byDate.get(key) || { present: 0, counted: 0 };
+      cur.counted += 1;
+      if (a.status === "PRESENT") cur.present += 1;
+      byDate.set(key, cur);
     }
-    workByIntern.set(a.internId, cur);
+    const attendanceTrend = [...byDate.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, v]) => ({
+        date,
+        rate: v.counted ? Math.round((v.present / v.counted) * 100) : 0,
+        present: v.present,
+        total: v.counted,
+      }));
+
+    charts = {
+      taskStatus,
+      attendanceTrend,
+      internBars: sorted.map((r) => ({
+        internId: r.internId,
+        name: r.fullName.split(" ")[0],
+        fullName: r.fullName,
+        score: r.score,
+        attendance: r.attendanceRate,
+        tasks: r.taskCompletionRate,
+      })),
+    };
+
+    if (section === "charts") {
+      return res.json({
+        ...base,
+        summary: summaryFromRows(sorted, {
+          totalAssignments: assignments.length,
+          totalAttendanceRows: attendance.length,
+        }),
+        charts,
+      });
+    }
   }
 
-  const attendance = internIds.length
-    ? await prisma.attendance.findMany({
-        where: { internId: { in: internIds } },
-        select: { status: true, date: true },
-        orderBy: { date: "asc" },
-      })
-    : [];
+  let internsPayload: DetailPayload["interns"] | undefined;
+  if (wantStudents) {
+    const workByIntern = new Map<
+      string,
+      { done: number; submitted: number; needs: number; assigned: number; titles: string[] }
+    >();
+    for (const a of assignments) {
+      const cur = workByIntern.get(a.internId) || {
+        done: 0,
+        submitted: 0,
+        needs: 0,
+        assigned: 0,
+        titles: [],
+      };
+      if (a.status === "DONE") cur.done += 1;
+      else if (a.status === "SUBMITTED") cur.submitted += 1;
+      else if (a.status === "NEEDS_IMPROVEMENT") cur.needs += 1;
+      else cur.assigned += 1;
+      if (cur.titles.length < 4) {
+        cur.titles.push(`Day ${a.dayNumber} · Task ${a.taskNumber}: ${a.task.title} (${a.status})`);
+      }
+      workByIntern.set(a.internId, cur);
+    }
 
-  const byDate = new Map<string, { present: number; counted: number }>();
-  for (const a of attendance) {
-    if (a.status === "WEEK_OFF") continue;
-    const key = a.date.toISOString().slice(0, 10);
-    const cur = byDate.get(key) || { present: 0, counted: 0 };
-    cur.counted += 1;
-    if (a.status === "PRESENT") cur.present += 1;
-    byDate.set(key, cur);
+    const allInterns = sorted.map((r) => {
+      const w = workByIntern.get(r.internId);
+      return {
+        ...r,
+        work: w
+          ? {
+              done: w.done,
+              submitted: w.submitted,
+              needsImprovement: w.needs,
+              assigned: w.assigned,
+              recentTitles: w.titles,
+            }
+          : { done: 0, submitted: 0, needsImprovement: 0, assigned: 0, recentTitles: [] },
+      };
+    });
+
+    const paged = paginate(allInterns, page, pageSize);
+    internsPayload = paged.items;
+    if (section === "students") {
+      return res.json({
+        ...base,
+        summary: summaryFromRows(sorted, { totalAssignments: assignments.length }),
+        interns: paged.items,
+        studentsPagination: paged.pagination,
+      });
+    }
   }
-  const attendanceTrend = [...byDate.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([date, v]) => ({
-      date,
-      rate: v.counted ? Math.round((v.present / v.counted) * 100) : 0,
-      present: v.present,
-      total: v.counted,
-    }));
 
-  const recentWork = assignments.slice(0, 40).map((a) => ({
-    internId: a.internId,
-    internName: a.intern.user.fullName,
-    email: a.intern.user.email,
-    title: a.task.title,
-    dayNumber: a.dayNumber,
-    taskNumber: a.taskNumber,
-    status: a.status,
-    forDate: a.forDate,
-  }));
-
-  // Related groups (for college) / colleges (for group) — clickable drill targets
-  let relatedGroups: {
-    name: string;
-    students: number;
-    avgScore: number;
-    avgAttendance: number;
-    avgTasks: number;
-  }[] = [];
-  let relatedColleges: {
-    name: string;
-    students: number;
-    avgScore: number;
-    avgAttendance: number;
-    avgTasks: number;
-  }[] = [];
-
-  if (internIds.length) {
+  let relatedGroups: DetailPayload["relatedGroups"];
+  let relatedColleges: DetailPayload["relatedColleges"];
+  if (wantRelated && internIds.length) {
     if (type === "college") {
       const memberships = await prisma.groupMember.findMany({
         where: { internId: { in: internIds }, isActive: true },
@@ -727,7 +796,7 @@ router.get("/detail", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async (r
         })
         .sort((a, b) => b.students - a.students);
     } else {
-      const byCollege = new Map<string, Row[]>();
+      const byCollege = new Map<string, typeof sorted>();
       for (const r of sorted) {
         const cName = r.college || "Unassigned";
         if (!byCollege.has(cName)) byCollege.set(cName, []);
@@ -746,19 +815,55 @@ router.get("/detail", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async (r
         })
         .sort((a, b) => b.students - a.students);
     }
+
+    if (section === "related") {
+      return res.json({ ...base, relatedGroups, relatedColleges });
+    }
   }
 
+  let recentWork: DetailPayload["recentWork"];
+  if (wantWork) {
+    const allWork = assignments.map((a) => ({
+      internId: a.internId,
+      internName: a.intern.user.fullName,
+      email: a.intern.user.email,
+      title: a.task.title,
+      dayNumber: a.dayNumber,
+      taskNumber: a.taskNumber,
+      status: a.status,
+      forDate: a.forDate,
+    }));
+    const paged = paginate(allWork, page, pageSize);
+    recentWork = paged.items;
+    if (section === "work") {
+      return res.json({
+        ...base,
+        recentWork: paged.items,
+        workPagination: paged.pagination,
+      });
+    }
+  }
+
+  // section === 'all' — full payload (legacy)
+  const attendance = internIds.length
+    ? await prisma.attendance.findMany({
+        where: { internId: { in: internIds } },
+        select: { status: true, date: true },
+        orderBy: { date: "asc" },
+      })
+    : [];
+
   res.json({
-    type,
-    name,
+    ...base,
     summary: summaryFromRows(sorted, {
       totalAssignments: assignments.length,
       totalAttendanceRows: attendance.length,
     }),
-    charts: {
-      taskStatus,
-      attendanceTrend,
+    charts: charts ?? {
+      taskStatus: { ASSIGNED: 0, SUBMITTED: 0, NEEDS_IMPROVEMENT: 0, DONE: 0 },
+      attendanceTrend: [],
       internBars: sorted.map((r) => ({
+        internId: r.internId,
         name: r.fullName.split(" ")[0],
         fullName: r.fullName,
         score: r.score,
@@ -766,26 +871,51 @@ router.get("/detail", requireRole("ADMIN", "HR", "TRAINER", "COLLEGE"), async (r
         tasks: r.taskCompletionRate,
       })),
     },
-    interns: sorted.map((r) => {
-      const w = workByIntern.get(r.internId);
-      return {
+    interns:
+      internsPayload ??
+      sorted.map((r) => ({
         ...r,
-        work: w
-          ? {
-              done: w.done,
-              submitted: w.submitted,
-              needsImprovement: w.needs,
-              assigned: w.assigned,
-              recentTitles: w.titles,
-            }
-          : { done: 0, submitted: 0, needsImprovement: 0, assigned: 0, recentTitles: [] },
-      };
-    }),
+        work: { done: 0, submitted: 0, needsImprovement: 0, assigned: 0, recentTitles: [] },
+      })),
     relatedGroups,
     relatedColleges,
-    recentWork,
+    recentWork: recentWork ?? assignments.slice(0, 40).map((a) => ({
+      internId: a.internId,
+      internName: a.intern.user.fullName,
+      email: a.intern.user.email,
+      title: a.task.title,
+      dayNumber: a.dayNumber,
+      taskNumber: a.taskNumber,
+      status: a.status,
+      forDate: a.forDate,
+    })),
   });
 });
+
+/** @deprecated inline type helper for detail sections */
+type DetailPayload = {
+  type: "college" | "group";
+  name: string;
+  summary: ReturnType<typeof summaryFromRows>;
+  charts: {
+    taskStatus: Record<string, number>;
+    attendanceTrend: { date: string; rate: number; present: number; total: number }[];
+    internBars: { internId: string; name: string; fullName: string; score: number; attendance: number; tasks: number }[];
+  };
+  interns: InternRow[];
+  relatedGroups?: { name: string; students: number; avgScore: number; avgAttendance: number; avgTasks: number }[];
+  relatedColleges?: { name: string; students: number; avgScore: number; avgAttendance: number; avgTasks: number }[];
+  recentWork: {
+    internId?: string;
+    internName: string;
+    email: string;
+    title: string;
+    dayNumber: number;
+    taskNumber: number;
+    status: string;
+    forDate: Date;
+  }[];
+};
 
 /**
  * Day roster under analytics filters — click a date from Attendance tab.
