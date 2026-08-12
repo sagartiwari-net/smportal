@@ -200,6 +200,7 @@ export async function syncGroupTasksToInterns(groupId: string, internIds: string
             githubUrl: sibling.submission.githubUrl,
             liveUrl: sibling.submission.liveUrl,
             submittedAt: sibling.submission.submittedAt,
+            submitCount: sibling.submission.submitCount ?? 1,
           },
         });
         synced += 1;
@@ -238,6 +239,7 @@ export async function syncSiblingAssignments(
       githubUrl: string;
       liveUrl?: string | null;
       submittedAt?: Date;
+      submitCount?: number;
     };
     feedback?: { reviewerId: string; comment: string; newStatus: TaskStatus };
   },
@@ -279,6 +281,7 @@ export async function syncSiblingAssignments(
           githubUrl: opts.submission.githubUrl,
           liveUrl: opts.submission.liveUrl ?? null,
           submittedAt: opts.submission.submittedAt || new Date(),
+          ...(opts.submission.submitCount != null ? { submitCount: opts.submission.submitCount } : {}),
         },
         create: {
           assignmentId: s.id,
@@ -286,6 +289,7 @@ export async function syncSiblingAssignments(
           githubUrl: opts.submission.githubUrl,
           liveUrl: opts.submission.liveUrl ?? null,
           submittedAt: opts.submission.submittedAt || new Date(),
+          submitCount: opts.submission.submitCount ?? 1,
         },
       });
       if (opts.feedback) {

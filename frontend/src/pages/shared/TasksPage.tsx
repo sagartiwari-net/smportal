@@ -44,6 +44,10 @@ type Assignment = {
     liveUrl?: string | null;
     feedbacks?: { comment: string; newStatus: string; reviewer?: { fullName: string; role?: string } }[];
   } | null;
+  canSubmit?: boolean;
+  submitBlockReason?: string | null;
+  submitCount?: number;
+  submitsMax?: number;
 };
 
 function roleLabel(role?: string | null) {
@@ -926,6 +930,9 @@ export function TasksPage() {
   function renderAssignmentCard(a: Assignment) {
     const open = !!expanded[a.id];
     const showMark = !!marking[a.id];
+    const canSubmit = a.canSubmit !== false && a.status !== "DONE";
+    const submitLabel =
+      a.status === "NEEDS_IMPROVEMENT" || (a.submitCount ?? 0) > 0 ? "Resubmit Task" : "Mark Task";
     return (
       <div key={a.id} className="rounded-xl border bg-white">
         <button
@@ -952,7 +959,7 @@ export function TasksPage() {
             <p className="whitespace-pre-wrap text-sm text-slate-600">{a.task.description}</p>
             <p className="text-xs text-slate-400">Due: {formatDate(a.task.dueDate || a.forDate)}</p>
 
-            {isIntern && a.status !== "DONE" && !showMark && (
+            {isIntern && canSubmit && !showMark && (
               <button
                 type="button"
                 className="rounded-lg bg-green-600 px-4 py-2.5 text-sm font-medium text-white"
@@ -961,11 +968,26 @@ export function TasksPage() {
                   setMarking((m) => ({ ...m, [a.id]: true }));
                 }}
               >
-                Mark Task
+                {submitLabel}
               </button>
             )}
 
-            {isIntern && a.status !== "DONE" && showMark && (
+            {isIntern && !canSubmit && a.status !== "DONE" && a.submitBlockReason && (
+              <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                {a.submitBlockReason}
+              </p>
+            )}
+
+            {isIntern && a.status !== "DONE" && (a.submitCount ?? 0) > 0 && (
+              <p className="text-xs text-slate-500">
+                Submissions used: {a.submitCount}/{a.submitsMax ?? 2}
+                {(a.submitCount ?? 0) < (a.submitsMax ?? 2) && canSubmit
+                  ? " · You may submit once more before review"
+                  : ""}
+              </p>
+            )}
+
+            {isIntern && canSubmit && showMark && (
               <div className="space-y-2 rounded-lg border border-green-100 bg-green-50/50 p-3" onClick={(e) => e.stopPropagation()}>
                 <p className="text-sm font-medium text-green-800">Submit your work</p>
                 <textarea

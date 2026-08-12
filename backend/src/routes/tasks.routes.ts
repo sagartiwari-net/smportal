@@ -20,6 +20,54 @@ import {
 const router = Router();
 router.use(requireAuth);
 
+const MAX_SELF_SUBMITS = 2;
+
+function internSubmitEligibility(status: TaskStatus, submitCount: number) {
+  if (status === TaskStatus.DONE) {
+    return {
+      canSubmit: false,
+      reason: "Task marked complete.",
+      submitCount,
+      submitsMax: MAX_SELF_SUBMITS,
+    };
+  }
+  if (status === TaskStatus.ASSIGNED) {
+    return { canSubmit: true, reason: null as string | null, submitCount, submitsMax: MAX_SELF_SUBMITS };
+  }
+  if (submitCount >= MAX_SELF_SUBMITS) {
+    return {
+      canSubmit: false,
+      reason:
+        "You have submitted twice. Wait for reviewer feedback (Needs improvement) before submitting again.",
+      submitCount,
+      submitsMax: MAX_SELF_SUBMITS,
+    };
+  }
+  return { canSubmit: true, reason: null as string | null, submitCount, submitsMax: MAX_SELF_SUBMITS };
+}
+
+function enrichInternAssignment<
+  T extends {
+    id: string;
+    status: TaskStatus;
+    forDate: Date;
+    dayNumber: number;
+    taskNumber: number;
+    task: { title: string };
+    submission?: { submitCount?: number } | null;
+  },
+>(a: T) {
+  const submitCount = a.submission?.submitCount ?? 0;
+  const elig = internSubmitEligibility(a.status, submitCount);
+  return {
+    ...withLabels([a])[0],
+    submitCount: elig.submitCount,
+    submitsMax: elig.submitsMax,
+    canSubmit: elig.canSubmit,
+    submitBlockReason: elig.reason,
+  };
+}
+
 async function internProfileId(userId: string) {
   const p = await prisma.internProfile.findUnique({ where: { userId } });
   return p?.id;
@@ -317,7 +365,7 @@ router.get("/", async (req, res) => {
     }
 
     return res.json({
-      assignments: withLabels(pageSlice),
+      assignments: pageSlice.map((a) => enrichInternAssignment(a)),
       pagination: paginationMeta(page, limit, total),
       statusCounts,
     });
@@ -1556,6 +1604,13 @@ router.post("/assignments/:id/submit", requireRole("INTERN"), async (req, res) =
     return res.status(400).json({ message: "Already marked done" });
   }
 
+  const existing = await prisma.submission.findUnique({ where: { assignmentId: assignment.id } });
+  const used = existing?.submitCount ?? 0;
+  const elig = internSubmitEligibility(assignment.status, used);
+  if (!elig.canSubmit) {
+    return res.status(400).json({ message: elig.reason || "Cannot submit now" });
+  }
+
   const submission = await prisma.$transaction(async (tx) => {
     const sub = await tx.submission.upsert({
       where: { assignmentId: assignment.id },
@@ -1564,12 +1619,14 @@ router.post("/assignments/:id/submit", requireRole("INTERN"), async (req, res) =
         githubUrl: parsed.data.githubUrl,
         liveUrl: parsed.data.liveUrl || null,
         submittedAt: new Date(),
+        submitCount: used + 1,
       },
       create: {
         assignmentId: assignment.id,
         projectDetails: parsed.data.projectDetails,
         githubUrl: parsed.data.githubUrl,
         liveUrl: parsed.data.liveUrl || null,
+        submitCount: 1,
       },
     });
     await tx.taskAssignment.update({
@@ -1587,10 +1644,16 @@ router.post("/assignments/:id/submit", requireRole("INTERN"), async (req, res) =
       githubUrl: parsed.data.githubUrl,
       liveUrl: parsed.data.liveUrl || null,
       submittedAt: submission.submittedAt,
+      submitCount: submission.submitCount,
     },
   });
 
-  res.json({ submission, status: TaskStatus.SUBMITTED });
+  res.json({
+    submission,
+    status: TaskStatus.SUBMITTED,
+    submitCount: submission.submitCount,
+    canSubmit: internSubmitEligibility(TaskStatus.SUBMITTED, submission.submitCount).canSubmit,
+  });
 });
 
 router.post("/assignments/:id/review", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
@@ -1629,7 +1692,16 @@ router.post("/assignments/:id/review", requireRole("ADMIN", "HR", "TRAINER"), as
       where: { id: assignment.id },
       data: { status: newStatus },
     });
+    if (newStatus === TaskStatus.NEEDS_IMPROVEMENT) {
+      await tx.submission.update({
+        where: { id: assignment.submission!.id },
+        data: { submitCount: 0 },
+      });
+    }
   });
+
+  const syncSubmitCount =
+    newStatus === TaskStatus.NEEDS_IMPROVEMENT ? 0 : assignment.submission.submitCount;
 
   // Mirror review status (+ feedback) to same curriculum task in other groups
   await syncSiblingAssignments(assignment.id, {
@@ -1639,6 +1711,7 @@ router.post("/assignments/:id/review", requireRole("ADMIN", "HR", "TRAINER"), as
       githubUrl: assignment.submission.githubUrl,
       liveUrl: assignment.submission.liveUrl,
       submittedAt: assignment.submission.submittedAt,
+      submitCount: syncSubmitCount,
     },
     feedback: {
       reviewerId: req.user!.id,
