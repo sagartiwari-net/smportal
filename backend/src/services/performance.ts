@@ -1,17 +1,26 @@
 import { prisma } from "../config/db";
+import { dedupeAssignmentsByIdentity } from "./groupTaskSync";
 
 export async function computeInternPerformance(internId: string) {
   const [attendance, assignments] = await Promise.all([
     prisma.attendance.findMany({ where: { internId } }),
-    prisma.taskAssignment.findMany({ where: { internId } }),
+    prisma.taskAssignment.findMany({
+      where: { internId },
+      include: {
+        task: { select: { id: true, title: true, sourceLibraryId: true } },
+      },
+      orderBy: { createdAt: "asc" },
+    }),
   ]);
 
   const present = attendance.filter((a) => a.status === "PRESENT").length;
   const counted = attendance.filter((a) => a.status !== "WEEK_OFF").length;
   const attendanceRate = counted === 0 ? 0 : (present / counted) * 100;
 
-  const totalTasks = assignments.length;
-  const done = assignments.filter((a) => a.status === "DONE").length;
+  // Same curriculum task in multiple groups counts once for overall score
+  const unique = dedupeAssignmentsByIdentity(assignments);
+  const totalTasks = unique.length;
+  const done = unique.filter((a) => a.status === "DONE").length;
   const taskCompletionRate = totalTasks === 0 ? 0 : (done / totalTasks) * 100;
 
   const score = Math.round(0.5 * attendanceRate + 0.5 * taskCompletionRate);
@@ -26,7 +35,7 @@ export async function computeInternPerformance(internId: string) {
     leave: attendance.filter((a) => a.status === "LEAVE").length,
     totalTasks,
     doneTasks: done,
-    submittedTasks: assignments.filter((a) => a.status === "SUBMITTED").length,
-    needsImprovement: assignments.filter((a) => a.status === "NEEDS_IMPROVEMENT").length,
+    submittedTasks: unique.filter((a) => a.status === "SUBMITTED").length,
+    needsImprovement: unique.filter((a) => a.status === "NEEDS_IMPROVEMENT").length,
   };
 }

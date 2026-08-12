@@ -843,7 +843,16 @@ router.get("/report/intern/:internId", requireRole("ADMIN", "HR", "TRAINER", "CO
     prisma.taskAssignment.findMany({
       where: taskWhere,
       include: {
-        task: { select: { id: true, title: true, description: true } },
+        task: {
+          select: {
+            id: true,
+            title: true,
+            description: true,
+            groupId: true,
+            group: { select: { id: true, name: true } },
+            sourceLibraryId: true,
+          },
+        },
       },
       orderBy: [{ forDate: "desc" }, { taskNumber: "asc" }],
       skip: (taskPage - 1) * taskLimit,
@@ -903,6 +912,8 @@ router.get("/report/intern/:internId", requireRole("ADMIN", "HR", "TRAINER", "CO
         taskNumber: a.taskNumber,
         title: a.task.title,
         description: a.task.description,
+        groupId: a.task.groupId,
+        groupName: a.task.group?.name || null,
       })),
       pagination: paginationMeta(taskPage, taskLimit, taskTotal),
       statusFilter: taskStatus || "all",

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { syncAllActiveMembers, syncGroupTasksToInterns } from "../services/groupTaskSync";
 import { getTrainerGroupIds, syncPrimaryGroupTrainer, trainerOwnsGroup } from "../services/trainerScope";
 
 const router = Router();
@@ -10,6 +11,25 @@ router.use(requireAuth);
 async function getInternProfileId(userId: string) {
   const p = await prisma.internProfile.findUnique({ where: { userId } });
   return p?.id;
+}
+
+/** Add/reactivate membership without removing the intern from other groups. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function ensureActiveMembership(tx: any, groupId: string, internId: string) {
+  const existing = await tx.groupMember.findFirst({
+    where: { groupId, internId },
+    orderBy: { joinedAt: "desc" },
+  });
+  if (existing) {
+    if (!existing.isActive) {
+      await tx.groupMember.update({
+        where: { id: existing.id },
+        data: { isActive: true, leftAt: null },
+      });
+    }
+    return;
+  }
+  await tx.groupMember.create({ data: { groupId, internId } });
 }
 
 router.get("/", requireRole("ADMIN", "HR", "TRAINER", "INTERN", "COLLEGE"), async (req, res) => {
@@ -258,14 +278,14 @@ router.post("/", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
 
     const internIds = parsed.data.internIds || [];
     for (const internId of internIds) {
-      await tx.groupMember.updateMany({
-        where: { internId, isActive: true },
-        data: { isActive: false, leftAt: new Date() },
-      });
-      await tx.groupMember.create({ data: { groupId: g.id, internId } });
+      await ensureActiveMembership(tx, g.id, internId);
     }
     return g;
   });
+
+  if ((parsed.data.internIds || []).length) {
+    await syncGroupTasksToInterns(group.id, parsed.data.internIds || []);
+  }
 
   const full = await prisma.trainingGroup.findUnique({
     where: { id: group.id },
@@ -291,15 +311,36 @@ router.post("/:id/members", requireRole("ADMIN", "HR", "TRAINER"), async (req, r
 
   await prisma.$transaction(async (tx) => {
     for (const internId of parsed.data.internIds) {
-      await tx.groupMember.updateMany({
-        where: { internId, isActive: true },
-        data: { isActive: false, leftAt: new Date() },
-      });
-      await tx.groupMember.create({ data: { groupId: group.id, internId } });
+      await ensureActiveMembership(tx, group.id, internId);
     }
   });
 
-  res.json({ message: "Members added" });
+  // Copy existing group tasks onto newly added members only
+  const sync = await syncGroupTasksToInterns(group.id, parsed.data.internIds);
+
+  res.json({
+    message: "Members added",
+    tasksAssigned: sync.assigned,
+    submissionsSynced: sync.synced,
+    groupTasksFound: sync.taskCount,
+  });
+});
+
+/** Backfill: assign this group's existing tasks to all active members (idempotent). */
+router.post("/:id/sync-tasks", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {
+  const group = await prisma.trainingGroup.findUnique({ where: { id: req.params.id } });
+  if (!group) return res.status(404).json({ message: "Group not found" });
+  if (req.user!.role === "TRAINER" && !(await trainerOwnsGroup(req.user!.id, group.id))) {
+    return res.status(403).json({ message: "Not your group" });
+  }
+
+  const sync = await syncAllActiveMembers(group.id);
+  res.json({
+    message: "Group tasks synced to members",
+    tasksAssigned: sync.assigned,
+    submissionsSynced: sync.synced,
+    groupTasksFound: sync.taskCount,
+  });
 });
 
 router.delete("/:id/members/:internId", requireRole("ADMIN", "HR", "TRAINER"), async (req, res) => {

@@ -10,6 +10,12 @@ import {
   trainerOwnsGroup,
 } from "../services/trainerScope";
 import { buildTasksExcel, buildTaskBatchExcel } from "../services/tasksReportExcel";
+import {
+  dedupeAssignmentsByIdentity,
+  findSiblingAssignment,
+  syncSiblingAssignments,
+  taskIdentityKey,
+} from "../services/groupTaskSync";
 
 const router = Router();
 router.use(requireAuth);
@@ -145,6 +151,12 @@ async function resolveInternIds(groupId?: string, internIds?: string[]) {
 }
 
 async function assignTaskToInterns(taskId: string, title: string, forDate: Date, internIds: string[]) {
+  const taskMeta = await prisma.task.findUnique({
+    where: { id: taskId },
+    select: { id: true, title: true, sourceLibraryId: true },
+  });
+  const identity = taskMeta ? taskIdentityKey(taskMeta) : `title:${title.trim().toLowerCase()}`;
+
   const created = [];
   const skipped: string[] = [];
   for (const internId of internIds) {
@@ -155,17 +167,39 @@ async function assignTaskToInterns(taskId: string, title: string, forDate: Date,
       skipped.push(internId);
       continue;
     }
-    const { dayNumber, taskNumber } = await computeDayAndTask(internId, forDate);
+
+    const sibling = await findSiblingAssignment(internId, identity, taskId);
+    let dayNumber = sibling?.dayNumber;
+    let taskNumber = sibling?.taskNumber;
+    if (dayNumber == null || taskNumber == null) {
+      const computed = await computeDayAndTask(internId, forDate);
+      dayNumber = dayNumber ?? computed.dayNumber;
+      taskNumber = taskNumber ?? computed.taskNumber;
+    }
+
     const row = await prisma.taskAssignment.create({
       data: {
         taskId,
         internId,
-        status: TaskStatus.ASSIGNED,
+        status: sibling?.status || TaskStatus.ASSIGNED,
         forDate,
         dayNumber,
         taskNumber,
       },
     });
+
+    if (sibling?.submission) {
+      await prisma.submission.create({
+        data: {
+          assignmentId: row.id,
+          projectDetails: sibling.submission.projectDetails,
+          githubUrl: sibling.submission.githubUrl,
+          liveUrl: sibling.submission.liveUrl,
+          submittedAt: sibling.submission.submittedAt,
+        },
+      });
+    }
+
     created.push({
       ...row,
       displayLabel: displayLabel(dayNumber, taskNumber, title),
@@ -252,29 +286,38 @@ router.get("/", async (req, res) => {
   if (role === "INTERN") {
     const iid = await internProfileId(req.user!.id);
     const where = { internId: iid || "", ...statusWhere, ...searchWhere };
-    const [total, assignments, statusCounts] = await Promise.all([
-      prisma.taskAssignment.count({ where }),
-      prisma.taskAssignment.findMany({
-        where,
-        include: {
-          task: true,
-          submission: {
-            include: {
-              feedbacks: {
-                orderBy: { createdAt: "desc" as const },
-                include: { reviewer: { select: { fullName: true } } },
-              },
+    const all = await prisma.taskAssignment.findMany({
+      where,
+      include: {
+        task: true,
+        submission: {
+          include: {
+            feedbacks: {
+              orderBy: { createdAt: "desc" as const },
+              include: { reviewer: { select: { fullName: true } } },
             },
           },
         },
-        orderBy: [{ forDate: "desc" }, { taskNumber: "asc" }],
-        skip,
-        take: limit,
-      }),
-      statusCountsFor({ internId: iid || "", ...searchWhere }),
-    ]);
+      },
+      orderBy: [{ forDate: "desc" }, { taskNumber: "asc" }, { createdAt: "asc" }],
+    });
+
+    // Same curriculum task across groups → show once (keep earliest)
+    const deduped = dedupeAssignmentsByIdentity(all).sort((a, b) => {
+      const d = b.forDate.getTime() - a.forDate.getTime();
+      if (d !== 0) return d;
+      return a.taskNumber - b.taskNumber;
+    });
+
+    const total = deduped.length;
+    const pageSlice = deduped.slice(skip, skip + limit);
+    const statusCounts = { ASSIGNED: 0, SUBMITTED: 0, NEEDS_IMPROVEMENT: 0, DONE: 0 };
+    for (const a of deduped) {
+      if (a.status in statusCounts) statusCounts[a.status as keyof typeof statusCounts] += 1;
+    }
+
     return res.json({
-      assignments: withLabels(assignments),
+      assignments: withLabels(pageSlice),
       pagination: paginationMeta(page, limit, total),
       statusCounts,
     });
@@ -1516,6 +1559,17 @@ router.post("/assignments/:id/submit", requireRole("INTERN"), async (req, res) =
     return sub;
   });
 
+  // Mirror submit to same curriculum task in other groups
+  await syncSiblingAssignments(assignment.id, {
+    status: TaskStatus.SUBMITTED,
+    submission: {
+      projectDetails: parsed.data.projectDetails,
+      githubUrl: parsed.data.githubUrl,
+      liveUrl: parsed.data.liveUrl || null,
+      submittedAt: submission.submittedAt,
+    },
+  });
+
   res.json({ submission, status: TaskStatus.SUBMITTED });
 });
 
@@ -1555,6 +1609,22 @@ router.post("/assignments/:id/review", requireRole("ADMIN", "HR", "TRAINER"), as
       where: { id: assignment.id },
       data: { status: newStatus },
     });
+  });
+
+  // Mirror review status (+ feedback) to same curriculum task in other groups
+  await syncSiblingAssignments(assignment.id, {
+    status: newStatus,
+    submission: {
+      projectDetails: assignment.submission.projectDetails,
+      githubUrl: assignment.submission.githubUrl,
+      liveUrl: assignment.submission.liveUrl,
+      submittedAt: assignment.submission.submittedAt,
+    },
+    feedback: {
+      reviewerId: req.user!.id,
+      comment: parsed.data.comment,
+      newStatus,
+    },
   });
 
   res.json({ message: "Reviewed", status: newStatus });

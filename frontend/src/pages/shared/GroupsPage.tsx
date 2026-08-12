@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Pencil, Trash2, UserPlus, X } from "lucide-react";
+import { Pencil, RefreshCw, Trash2, UserPlus, X } from "lucide-react";
 import { api } from "../../api/client";
 import { PageHeader } from "../../components/ui/PageHeader";
 import { useAuth } from "../../auth/AuthContext";
@@ -404,13 +404,37 @@ export function GroupsPage({ basePath }: { basePath: string }) {
     e.preventDefault();
     if (!addingTo || addSelected.length === 0) return;
     try {
-      await api.post(`/groups/${addingTo.id}/members`, { internIds: addSelected });
+      const { data } = await api.post(`/groups/${addingTo.id}/members`, { internIds: addSelected });
       setAddingTo(null);
       await loadGroups();
       await loadCreatePool(createSearch);
+      const n = data?.tasksAssigned ?? 0;
+      const found = data?.groupTasksFound ?? 0;
+      if (found === 0) {
+        alert("Members added. No group-wide tasks found for this group yet.");
+      } else if (n > 0) {
+        alert(`Members added. ${n} task assignment(s) copied from ${found} group task(s).`);
+      } else {
+        alert(`Members added. They already had all ${found} group task(s).`);
+      }
     } catch (ex: unknown) {
       const ax = ex as { response?: { data?: { message?: string } } };
       setAddMsg(ax.response?.data?.message || "Failed to add");
+    }
+  }
+
+  async function syncGroupTasks(g: Group) {
+    if (!confirm(`Sync existing tasks of “${g.name}” to all current members?\n(Useful after adding members who missed auto-assign.)`)) {
+      return;
+    }
+    try {
+      const { data } = await api.post(`/groups/${g.id}/sync-tasks`);
+      alert(
+        `Synced: ${data?.tasksAssigned ?? 0} new assignment(s), ${data?.submissionsSynced ?? 0} submission(s) copied.`,
+      );
+    } catch (ex: unknown) {
+      const ax = ex as { response?: { data?: { message?: string } } };
+      alert(ax.response?.data?.message || "Sync failed");
     }
   }
 
@@ -621,6 +645,14 @@ export function GroupsPage({ basePath }: { basePath: string }) {
                         className="rounded-lg border px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
                       >
                         {g.internshipStatus === "COMPLETED" ? "Reopen" : "Complete"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void syncGroupTasks(g)}
+                        className="rounded-lg p-2 text-slate-600 hover:bg-slate-100"
+                        title="Sync existing group tasks to all members"
+                      >
+                        <RefreshCw className="h-4 w-4" />
                       </button>
                       <button
                         type="button"

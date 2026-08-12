@@ -6,6 +6,7 @@ import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { hashPassword } from "../utils/password";
 import { syncPrimaryGroupTrainer } from "../services/trainerScope";
+import { syncGroupTasksToInterns } from "../services/groupTaskSync";
 import { env } from "../config/env";
 
 const router = Router();
@@ -301,6 +302,19 @@ router.post("/approve", requireAuth, requireRole("ADMIN", "HR"), async (req, res
     }
   });
 
+  // Auto-assign existing group tasks to newly approved interns
+  const byGroup = new Map<string, string[]>();
+  for (const intern of pending) {
+    const gid = intern.invite?.groupId;
+    if (!gid) continue;
+    const list = byGroup.get(gid) || [];
+    list.push(intern.id);
+    byGroup.set(gid, list);
+  }
+  for (const [gid, ids] of byGroup) {
+    await syncGroupTasksToInterns(gid, ids);
+  }
+
   res.json({ approved: pending.length });
 });
 
@@ -426,6 +440,8 @@ router.post("/direct-hire", requireAuth, requireRole("ADMIN", "HR"), async (req,
   });
 
   if (data.newGroup?.trainerId) await syncPrimaryGroupTrainer(result.groupId);
+
+  await syncGroupTasksToInterns(result.groupId, [result.intern.id]);
 
   res.status(201).json({
     intern: {

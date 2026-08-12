@@ -124,6 +124,7 @@ type InternDossier = {
       dayNumber: number;
       taskNumber: number;
       title: string;
+      groupName?: string | null;
     }[];
   };
 };
@@ -652,6 +653,7 @@ export function AnalyticsDrillPanel({
                   <tr>
                     <th className="px-4 py-2">Task</th>
                     <th className="px-4 py-2">For</th>
+                    <th className="px-4 py-2">Group</th>
                     <th className="px-4 py-2">Status</th>
                   </tr>
                 </thead>
@@ -662,6 +664,7 @@ export function AnalyticsDrillPanel({
                         Day {t.dayNumber} · Task {t.taskNumber}: {t.title}
                       </td>
                       <td className="px-4 py-2">{String(t.forDate).slice(0, 10)}</td>
+                      <td className="px-4 py-2 text-slate-600">{t.groupName || "—"}</td>
                       <td className="px-4 py-2">{statusBadge(t.status)}</td>
                     </tr>
                   ))}
