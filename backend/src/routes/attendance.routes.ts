@@ -770,6 +770,10 @@ router.get("/report/intern/:internId", requireRole("ADMIN", "HR", "TRAINER", "CO
   if (![10, 20, 30].includes(taskLimit)) taskLimit = 10;
   const taskStatus =
     typeof req.query.taskStatus === "string" && req.query.taskStatus !== "all" ? req.query.taskStatus : "";
+  const includeRaw = typeof req.query.include === "string" ? req.query.include : "all";
+  const include = ["summary", "attendance", "tasks", "all"].includes(includeRaw) ? includeRaw : "all";
+  const wantAttendance = include === "all" || include === "attendance";
+  const wantTasks = include === "all" || include === "tasks";
 
   const intern = await prisma.internProfile.findUnique({
     where: { id: internId },
@@ -831,33 +835,41 @@ router.get("/report/intern/:internId", requireRole("ADMIN", "HR", "TRAINER", "CO
 
   const [perf, attTotal, attendanceRows, taskTotal, assignments] = await Promise.all([
     computeInternPerformance(internId),
-    prisma.attendance.count({ where: attWhere }),
-    prisma.attendance.findMany({
-      where: attWhere,
-      include: { markedBy: { select: { fullName: true, role: true } } },
-      orderBy: { date: "desc" },
-      skip: (attPage - 1) * attLimit,
-      take: attLimit,
-    }),
-    prisma.taskAssignment.count({ where: taskWhere }),
-    prisma.taskAssignment.findMany({
-      where: taskWhere,
-      include: {
-        task: {
-          select: {
-            id: true,
-            title: true,
-            description: true,
-            groupId: true,
-            group: { select: { id: true, name: true } },
-            sourceLibraryId: true,
+    wantAttendance
+      ? prisma.attendance.count({ where: attWhere })
+      : Promise.resolve(0),
+    wantAttendance
+      ? prisma.attendance.findMany({
+          where: attWhere,
+          include: { markedBy: { select: { fullName: true, role: true } } },
+          orderBy: { date: "desc" },
+          skip: (attPage - 1) * attLimit,
+          take: attLimit,
+        })
+      : Promise.resolve([]),
+    wantTasks
+      ? prisma.taskAssignment.count({ where: taskWhere })
+      : Promise.resolve(0),
+    wantTasks
+      ? prisma.taskAssignment.findMany({
+          where: taskWhere,
+          include: {
+            task: {
+              select: {
+                id: true,
+                title: true,
+                description: true,
+                groupId: true,
+                group: { select: { id: true, name: true } },
+                sourceLibraryId: true,
+              },
+            },
           },
-        },
-      },
-      orderBy: [{ forDate: "desc" }, { taskNumber: "asc" }],
-      skip: (taskPage - 1) * taskLimit,
-      take: taskLimit,
-    }),
+          orderBy: [{ forDate: "desc" }, { taskNumber: "asc" }],
+          skip: (taskPage - 1) * taskLimit,
+          take: taskLimit,
+        })
+      : Promise.resolve([]),
   ]);
 
   res.json({
@@ -896,28 +908,36 @@ router.get("/report/intern/:internId", requireRole("ADMIN", "HR", "TRAINER", "CO
     periodOptions,
     selectedPeriod: effectivePeriod,
     performance: perf,
-    attendance: {
-      from,
-      to,
-      period: effectivePeriod,
-      records: attendanceRows,
-      pagination: paginationMeta(attPage, attLimit, attTotal),
-    },
-    tasks: {
-      records: assignments.map((a) => ({
-        id: a.id,
-        status: a.status,
-        forDate: a.forDate,
-        dayNumber: a.dayNumber,
-        taskNumber: a.taskNumber,
-        title: a.task.title,
-        description: a.task.description,
-        groupId: a.task.groupId,
-        groupName: a.task.group?.name || null,
-      })),
-      pagination: paginationMeta(taskPage, taskLimit, taskTotal),
-      statusFilter: taskStatus || "all",
-    },
+    ...(wantAttendance
+      ? {
+          attendance: {
+            from,
+            to,
+            period: effectivePeriod,
+            records: attendanceRows,
+            pagination: paginationMeta(attPage, attLimit, attTotal),
+          },
+        }
+      : {}),
+    ...(wantTasks
+      ? {
+          tasks: {
+            records: assignments.map((a) => ({
+              id: a.id,
+              status: a.status,
+              forDate: a.forDate,
+              dayNumber: a.dayNumber,
+              taskNumber: a.taskNumber,
+              title: a.task.title,
+              description: a.task.description,
+              groupId: a.task.groupId,
+              groupName: a.task.group?.name || null,
+            })),
+            pagination: paginationMeta(taskPage, taskLimit, taskTotal),
+            statusFilter: taskStatus || "all",
+          },
+        }
+      : {}),
   });
 });
 

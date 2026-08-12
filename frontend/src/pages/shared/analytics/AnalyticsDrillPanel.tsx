@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
 import { api } from "../../../api/client";
 import { downloadExcel } from "../../../api/downloadExcel";
+import { useAuth } from "../../../auth/AuthContext";
 
 const GREEN = "#16a34a";
 const TEAL = "#0d9488";
@@ -113,10 +114,11 @@ type InternDossier = {
     totalTasks: number;
     doneTasks: number;
   };
-  attendance: {
+  attendance?: {
     records: { id: string; date: string; status: string }[];
+    pagination?: { page: number; limit: number; total: number; totalPages: number };
   };
-  tasks: {
+  tasks?: {
     records: {
       id: string;
       status: string;
@@ -126,8 +128,67 @@ type InternDossier = {
       title: string;
       groupName?: string | null;
     }[];
+    pagination?: { page: number; limit: number; total: number; totalPages: number };
   };
 };
+
+type InternTab = "overview" | "attendance" | "tasks" | "plagiarism";
+
+type PlagiarismFlag = {
+  assignmentId: string;
+  taskTitle: string;
+  dayNumber: number;
+  taskNumber: number;
+  forDate: string;
+  githubUrl: string;
+  projectDetailsPreview: string;
+  maxSimilarity: number;
+  matches: {
+    internId: string;
+    fullName: string;
+    email: string;
+    similarity: number;
+    matchType: "GITHUB_URL" | "PROJECT_TEXT" | "BOTH";
+    githubUrl: string;
+  }[];
+};
+
+type Pagination = { page: number; limit: number; total: number; totalPages: number };
+
+function TabPager({
+  pagination,
+  onChange,
+}: {
+  pagination: Pagination;
+  onChange: (page: number) => void;
+}) {
+  if (pagination.totalPages <= 1) return null;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-3 text-sm">
+      <span className="text-slate-500">
+        Page {pagination.page} of {pagination.totalPages} · {pagination.total} total
+      </span>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          disabled={pagination.page <= 1}
+          onClick={() => onChange(pagination.page - 1)}
+          className="rounded-lg border px-3 py-1 disabled:opacity-40"
+        >
+          Prev
+        </button>
+        <button
+          type="button"
+          disabled={pagination.page >= pagination.totalPages}
+          onClick={() => onChange(pagination.page + 1)}
+          className="rounded-lg border px-3 py-1 disabled:opacity-40"
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function ChartCard({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
@@ -191,18 +252,91 @@ export function AnalyticsDrillPanel({
   canManageIntern,
   onInternUpdated,
 }: Props) {
+  const { user } = useAuth();
+  const canViewPlagiarism =
+    user?.role === "ADMIN" || user?.role === "HR" || user?.role === "TRAINER" || user?.role === "COLLEGE";
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [detail, setDetail] = useState<DetailPayload | null>(null);
   const [day, setDay] = useState<DayPayload | null>(null);
   const [dossier, setDossier] = useState<InternDossier | null>(null);
+  const [internTab, setInternTab] = useState<InternTab>("overview");
+  const [tabLoading, setTabLoading] = useState(false);
+  const [attPage, setAttPage] = useState(1);
+  const [taskPage, setTaskPage] = useState(1);
+  const [plagPage, setPlagPage] = useState(1);
+  const [pageLimit] = useState(20);
+  const [plagiarism, setPlagiarism] = useState<{
+    summary: { totalFlags: number; checkedSubmissions: number };
+    flags: PlagiarismFlag[];
+    pagination: Pagination;
+  } | null>(null);
   const [exporting, setExporting] = useState(false);
   const [statusBusy, setStatusBusy] = useState(false);
 
-  async function reloadDossier() {
+  const internReportUrl = useCallback(
+    (params: Record<string, string | number>) => {
+      if (frame.kind !== "intern") return "";
+      const qs = new URLSearchParams({ period: "month", ...Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])) });
+      return `/attendance/report/intern/${frame.internId}?${qs}`;
+    },
+    [frame],
+  );
+
+  async function reloadDossierSummary() {
     if (frame.kind !== "intern") return;
-    const r = await api.get(`/attendance/report/intern/${frame.internId}?period=month&attLimit=10&taskLimit=10`);
+    const r = await api.get(internReportUrl({ include: "summary" }));
     setDossier(r.data);
+  }
+
+  async function loadAttendanceTab(page = attPage) {
+    if (frame.kind !== "intern") return;
+    setTabLoading(true);
+    try {
+      const r = await api.get(internReportUrl({ include: "attendance", attPage: page, attLimit: pageLimit }));
+      setDossier((prev) =>
+        prev
+          ? { ...prev, attendance: r.data.attendance }
+          : { intern: r.data.intern, performance: r.data.performance, attendance: r.data.attendance },
+      );
+    } catch {
+      setError("Could not load attendance.");
+    } finally {
+      setTabLoading(false);
+    }
+  }
+
+  async function loadTasksTab(page = taskPage) {
+    if (frame.kind !== "intern") return;
+    setTabLoading(true);
+    try {
+      const r = await api.get(internReportUrl({ include: "tasks", taskPage: page, taskLimit: pageLimit }));
+      setDossier((prev) =>
+        prev
+          ? { ...prev, tasks: r.data.tasks }
+          : { intern: r.data.intern, performance: r.data.performance, tasks: r.data.tasks },
+      );
+    } catch {
+      setError("Could not load tasks.");
+    } finally {
+      setTabLoading(false);
+    }
+  }
+
+  async function loadPlagiarismTab(page = plagPage) {
+    if (frame.kind !== "intern") return;
+    setTabLoading(true);
+    try {
+      const r = await api.get(`/interns/${frame.internId}/plagiarism`, {
+        params: { page, limit: pageLimit },
+      });
+      setPlagiarism(r.data);
+    } catch {
+      setError("Could not load plagiarism check.");
+    } finally {
+      setTabLoading(false);
+    }
   }
 
   async function toggleInternComplete() {
@@ -216,7 +350,7 @@ export function AnalyticsDrillPanel({
     setStatusBusy(true);
     try {
       await api.patch(`/interns/${frame.internId}/status`, { internshipStatus: next });
-      await reloadDossier();
+      await reloadDossierSummary();
       onInternUpdated?.();
     } catch {
       setError("Could not update internship status.");
@@ -231,6 +365,11 @@ export function AnalyticsDrillPanel({
     setDetail(null);
     setDay(null);
     setDossier(null);
+    setPlagiarism(null);
+    setInternTab("overview");
+    setAttPage(1);
+    setTaskPage(1);
+    setPlagPage(1);
 
     if (frame.kind === "college" || frame.kind === "group") {
       api
@@ -252,11 +391,18 @@ export function AnalyticsDrillPanel({
     }
 
     api
-      .get(`/attendance/report/intern/${frame.internId}?period=month&attLimit=10&taskLimit=10`)
+      .get(`/attendance/report/intern/${frame.internId}?period=month&include=summary`)
       .then((r) => setDossier(r.data))
       .catch(() => setError("Could not load student details."))
       .finally(() => setLoading(false));
   }, [frame, filterQuery]);
+
+  useEffect(() => {
+    if (frame.kind !== "intern" || loading || !dossier) return;
+    if (internTab === "attendance") void loadAttendanceTab(attPage);
+    if (internTab === "tasks") void loadTasksTab(taskPage);
+    if (internTab === "plagiarism" && canViewPlagiarism) void loadPlagiarismTab(plagPage);
+  }, [frame.kind, internTab, attPage, taskPage, plagPage, loading, dossier?.intern.id]);
 
   const detailBarsOption = useMemo<EChartsOption>(() => {
     const bars = detail?.charts.internBars ?? [];
@@ -662,59 +808,186 @@ export function AnalyticsDrillPanel({
             ))}
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-2">
-            <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-              <div className="border-b bg-slate-50 px-4 py-3">
-                <p className="text-sm font-semibold">Recent attendance</p>
-                <p className="text-xs text-slate-500">Click a date to open that day's roster</p>
-              </div>
-              <table className="min-w-full text-left text-sm">
-                <thead className="border-b text-slate-500">
-                  <tr>
-                    <th className="px-4 py-2">Date</th>
-                    <th className="px-4 py-2">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {dossier.attendance.records.map((a) => {
-                    const d = String(a.date).slice(0, 10);
-                    return (
-                      <tr key={a.id} className="border-b last:border-0">
-                        <td className="px-4 py-2">{linkBtn(d, () => onOpenDay(d))}</td>
-                        <td className="px-4 py-2">{statusBadge(a.status)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+            <div className="flex flex-wrap gap-1 border-b bg-slate-50 p-2">
+              {(
+                [
+                  ["overview", "Overview"],
+                  ["attendance", `Attendance (${dossier.performance.present + dossier.performance.absent + dossier.performance.leave})`],
+                  ["tasks", `Tasks (${dossier.performance.totalTasks})`],
+                  ...(canViewPlagiarism ? [["plagiarism", "Plagiarism"]] : []),
+                ] as [InternTab, string][]
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setInternTab(id)}
+                  className={`rounded-lg px-3 py-2 text-sm font-medium ${
+                    internTab === id ? "bg-green-600 text-white" : "text-slate-600 hover:bg-white"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
-            <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-              <div className="border-b bg-slate-50 px-4 py-3">
-                <p className="text-sm font-semibold">Recent tasks</p>
+
+            {tabLoading && internTab !== "overview" && (
+              <p className="p-4 text-sm text-slate-500">Loading {internTab}…</p>
+            )}
+
+            {internTab === "overview" && (
+              <div className="p-4 text-sm text-slate-600">
+                <p>
+                  Open <strong>Attendance</strong>, <strong>Tasks</strong>
+                  {canViewPlagiarism ? " or Plagiarism" : ""} tabs to load detailed records on demand — faster when data
+                  grows large.
+                </p>
+                <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-lg border p-3">
+                    <p className="text-xs uppercase text-slate-500">Present days</p>
+                    <p className="text-xl font-bold text-green-700">{dossier.performance.present}</p>
+                  </div>
+                  <div className="rounded-lg border p-3">
+                    <p className="text-xs uppercase text-slate-500">Absent days</p>
+                    <p className="text-xl font-bold text-rose-700">{dossier.performance.absent}</p>
+                  </div>
+                  <div className="rounded-lg border p-3">
+                    <p className="text-xs uppercase text-slate-500">Leave days</p>
+                    <p className="text-xl font-bold text-amber-700">{dossier.performance.leave}</p>
+                  </div>
+                </div>
               </div>
-              <table className="min-w-full text-left text-sm">
-                <thead className="border-b text-slate-500">
-                  <tr>
-                    <th className="px-4 py-2">Task</th>
-                    <th className="px-4 py-2">For</th>
-                    <th className="px-4 py-2">Group</th>
-                    <th className="px-4 py-2">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {dossier.tasks.records.map((t) => (
-                    <tr key={t.id} className="border-b last:border-0">
-                      <td className="px-4 py-2">
-                        Day {t.dayNumber} · Task {t.taskNumber}: {t.title}
-                      </td>
-                      <td className="px-4 py-2">{String(t.forDate).slice(0, 10)}</td>
-                      <td className="px-4 py-2 text-slate-600">{t.groupName || "—"}</td>
-                      <td className="px-4 py-2">{statusBadge(t.status)}</td>
+            )}
+
+            {internTab === "attendance" && !tabLoading && dossier.attendance && (
+              <>
+                <div className="border-b bg-slate-50 px-4 py-2 text-xs text-slate-500">
+                  Click a date to open that day&apos;s roster
+                </div>
+                <table className="min-w-full text-left text-sm">
+                  <thead className="border-b text-slate-500">
+                    <tr>
+                      <th className="px-4 py-2">Date</th>
+                      <th className="px-4 py-2">Status</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {dossier.attendance.records.map((a) => {
+                      const d = String(a.date).slice(0, 10);
+                      return (
+                        <tr key={a.id} className="border-b last:border-0">
+                          <td className="px-4 py-2">{linkBtn(d, () => onOpenDay(d))}</td>
+                          <td className="px-4 py-2">{statusBadge(a.status)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {dossier.attendance.records.length === 0 && (
+                  <p className="p-4 text-sm text-slate-500">No attendance records in this period.</p>
+                )}
+                {dossier.attendance.pagination && (
+                  <TabPager pagination={dossier.attendance.pagination} onChange={setAttPage} />
+                )}
+              </>
+            )}
+
+            {internTab === "tasks" && !tabLoading && dossier.tasks && (
+              <>
+                <table className="min-w-full text-left text-sm">
+                  <thead className="border-b text-slate-500">
+                    <tr>
+                      <th className="px-4 py-2">Task</th>
+                      <th className="px-4 py-2">For</th>
+                      <th className="px-4 py-2">Group</th>
+                      <th className="px-4 py-2">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dossier.tasks.records.map((t) => (
+                      <tr key={t.id} className="border-b last:border-0">
+                        <td className="px-4 py-2">
+                          Day {t.dayNumber} · Task {t.taskNumber}: {t.title}
+                        </td>
+                        <td className="px-4 py-2">{String(t.forDate).slice(0, 10)}</td>
+                        <td className="px-4 py-2 text-slate-600">{t.groupName || "—"}</td>
+                        <td className="px-4 py-2">{statusBadge(t.status)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {dossier.tasks.records.length === 0 && (
+                  <p className="p-4 text-sm text-slate-500">No tasks found.</p>
+                )}
+                {dossier.tasks.pagination && (
+                  <TabPager pagination={dossier.tasks.pagination} onChange={setTaskPage} />
+                )}
+              </>
+            )}
+
+            {internTab === "plagiarism" && canViewPlagiarism && !tabLoading && plagiarism && (
+              <>
+                <div className="border-b bg-slate-50 px-4 py-3 text-xs text-slate-600">
+                  Checked {plagiarism.summary.checkedSubmissions} submitted task(s). Flags when another intern has the
+                  same GitHub repo or ≥70% similar project description on the same curriculum task.
+                </div>
+                {plagiarism.flags.length === 0 ? (
+                  <p className="p-4 text-sm text-green-700">No plagiarism flags found.</p>
+                ) : (
+                  <div className="divide-y">
+                    {plagiarism.flags.map((f) => (
+                      <div key={f.assignmentId} className="p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <p className="font-medium text-slate-900">
+                              Day {f.dayNumber} · Task {f.taskNumber}: {f.taskTitle}
+                            </p>
+                            <p className="text-xs text-slate-500">{f.forDate}</p>
+                            <p className="mt-1 break-all text-xs text-slate-600">GitHub: {f.githubUrl}</p>
+                          </div>
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                              f.maxSimilarity >= 100 ? "bg-rose-100 text-rose-800" : "bg-amber-100 text-amber-800"
+                            }`}
+                          >
+                            {f.maxSimilarity}% match
+                          </span>
+                        </div>
+                        <p className="mt-2 line-clamp-2 text-xs text-slate-500">{f.projectDetailsPreview}</p>
+                        <div className="mt-3 overflow-x-auto rounded-lg border">
+                          <table className="min-w-full text-left text-xs">
+                            <thead className="border-b bg-slate-50 text-slate-500">
+                              <tr>
+                                <th className="px-3 py-2">Matched intern</th>
+                                <th className="px-3 py-2">Type</th>
+                                <th className="px-3 py-2">Similarity</th>
+                                <th className="px-3 py-2">Their GitHub</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {f.matches.map((m) => (
+                                <tr key={`${f.assignmentId}-${m.internId}`} className="border-b last:border-0">
+                                  <td className="px-3 py-2">
+                                    {linkBtn(m.fullName, () => onOpenIntern(m.internId, m.fullName))}
+                                    <div className="text-slate-400">{m.email}</div>
+                                  </td>
+                                  <td className="px-3 py-2">{m.matchType.replace(/_/g, " ")}</td>
+                                  <td className="px-3 py-2 font-medium">{m.similarity}%</td>
+                                  <td className="max-w-[200px] truncate px-3 py-2 text-slate-600">{m.githubUrl}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {plagiarism.pagination.totalPages > 1 && (
+                  <TabPager pagination={plagiarism.pagination} onChange={setPlagPage} />
+                )}
+              </>
+            )}
           </div>
         </>
       )}
