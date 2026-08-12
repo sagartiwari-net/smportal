@@ -1,9 +1,10 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { ArrowLeft, ChevronDown, ChevronRight, Pencil, Trash2, X } from "lucide-react";
 import { api } from "../../api/client";
 import { downloadExcel } from "../../api/downloadExcel";
 import { useAuth } from "../../auth/AuthContext";
 import { Badge } from "../../components/ui/Badge";
+import { InternPicker, type AvailableIntern, type CollegeBucket } from "../../components/InternPicker";
 import { PageHeader } from "../../components/ui/PageHeader";
 import { formatDate } from "../../lib/format";
 
@@ -264,11 +265,18 @@ export function TasksPage() {
 
   const [groups, setGroups] = useState<{ id: string; name: string }[]>([]);
   const [mode, setMode] = useState<"assign" | "save">("assign");
+  const [assignTarget, setAssignTarget] = useState<"group" | "individual">("group");
   const [libraryTaskId, setLibraryTaskId] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [forDate, setForDate] = useState(new Date().toISOString().slice(0, 10));
   const [groupId, setGroupId] = useState("");
+  const [groupSearch, setGroupSearch] = useState("");
+  const [selectedInternIds, setSelectedInternIds] = useState<string[]>([]);
+  const [internSearch, setInternSearch] = useState("");
+  const [assignColleges, setAssignColleges] = useState<CollegeBucket[]>([]);
+  const [assignNoCollege, setAssignNoCollege] = useState<AvailableIntern[]>([]);
+  const [assignPoolLoading, setAssignPoolLoading] = useState(false);
   const [alsoSave, setAlsoSave] = useState(false);
   const [formMsg, setFormMsg] = useState("");
   const [formErr, setFormErr] = useState("");
@@ -328,9 +336,29 @@ export function TasksPage() {
 
   async function loadGroups() {
     if (!(canAssign || isCollege || showAudit)) return;
-    const g = await api.get("/groups");
+    const g = await api.get("/groups?forAssign=1");
     setGroups(g.data.groups.map((x: { id: string; name: string }) => ({ id: x.id, name: x.name })));
   }
+
+  const loadAssignInternPool = useCallback(async (q = "") => {
+    setAssignPoolLoading(true);
+    try {
+      const { data } = await api.get("/groups/available-interns", {
+        params: q.trim() ? { q: q.trim() } : undefined,
+      });
+      setAssignColleges(data.colleges || []);
+      setAssignNoCollege(data.noCollege || []);
+    } finally {
+      setAssignPoolLoading(false);
+    }
+  }, []);
+
+  const internSearchDebounced = useMemo(() => internSearch, [internSearch]);
+  const filteredGroups = useMemo(() => {
+    const q = groupSearch.trim().toLowerCase();
+    if (!q) return groups;
+    return groups.filter((g) => g.name.toLowerCase().includes(q));
+  }, [groups, groupSearch]);
 
   async function loadInternAssignments(opts?: { page?: number; limit?: number }) {
     const page = opts?.page ?? assignPage;
@@ -474,15 +502,16 @@ export function TasksPage() {
     setLibraryOptions(data.tasks || []);
   }
 
-  async function checkAlreadyAssigned(libId: string, gId: string) {
-    if (!libId || !gId) {
+  async function checkAlreadyAssigned(libId: string, gId?: string, internIds?: string[]) {
+    if (!libId || (!gId && !internIds?.length)) {
       setAlreadyAssignedWarn(null);
       return;
     }
     try {
-      const { data } = await api.get(`/tasks/library/${libId}/already-assigned`, {
-        params: { groupId: gId },
-      });
+      const params: Record<string, string> = {};
+      if (gId) params.groupId = gId;
+      if (internIds?.length) params.internIds = internIds.join(",");
+      const { data } = await api.get(`/tasks/library/${libId}/already-assigned`, { params });
       if (data.count > 0) {
         setAlreadyAssignedWarn({
           count: data.count,
@@ -498,16 +527,28 @@ export function TasksPage() {
   }
 
   useEffect(() => {
-    if (mode === "assign" && libraryTaskId && groupId) {
+    if (mode !== "assign" || !libraryTaskId) {
+      setAlreadyAssignedWarn(null);
+      return;
+    }
+    if (assignTarget === "group" && groupId) {
       void checkAlreadyAssigned(libraryTaskId, groupId);
+    } else if (assignTarget === "individual" && selectedInternIds.length) {
+      void checkAlreadyAssigned(libraryTaskId, undefined, selectedInternIds);
     } else {
       setAlreadyAssignedWarn(null);
     }
-  }, [mode, libraryTaskId, groupId]);
+  }, [mode, libraryTaskId, groupId, assignTarget, selectedInternIds]);
 
   useEffect(() => {
     void loadGroups();
   }, []);
+
+  useEffect(() => {
+    if (!canAssign || staffTab !== "assign" || assignTarget !== "individual") return;
+    const t = setTimeout(() => void loadAssignInternPool(internSearchDebounced), 250);
+    return () => clearTimeout(t);
+  }, [canAssign, staffTab, assignTarget, internSearchDebounced, loadAssignInternPool]);
 
   useEffect(() => {
     if (!isIntern) return;
@@ -576,12 +617,23 @@ export function TasksPage() {
       let assignedCount = 0;
       let skippedCount = 0;
       let successMsg = "";
-      const assignGroupId = groupId;
+      const assignGroupId = assignTarget === "group" ? groupId : "";
+      const assignInternIds = assignTarget === "individual" ? selectedInternIds : undefined;
+
+      if (assignTarget === "group" && !assignGroupId) {
+        setFormErr("Select a group to assign.");
+        return;
+      }
+      if (assignTarget === "individual" && !assignInternIds?.length) {
+        setFormErr("Select at least one intern.");
+        return;
+      }
 
       if (libraryTaskId) {
         const { data } = await api.post(`/tasks/${libraryTaskId}/assign`, {
           forDate,
           groupId: assignGroupId || undefined,
+          internIds: assignInternIds,
         });
         assignedCount = data.assignedCount ?? 0;
         skippedCount = data.skippedCount ?? 0;
@@ -596,6 +648,7 @@ export function TasksPage() {
           description,
           forDate,
           groupId: assignGroupId || undefined,
+          internIds: assignInternIds,
           alsoSaveToLibrary: alsoSave,
         });
         assignedCount = data.assignedCount ?? data.assignments?.length ?? 0;
@@ -615,7 +668,7 @@ export function TasksPage() {
           successMsg ||
             `Assigned to ${assignedCount} intern(s)` +
               (skippedCount ? ` · ${skippedCount} already had it (skipped)` : "") +
-              " · Manage tab me group open karke dekho",
+              (assignGroupId ? " · Manage tab me group open karke dekho" : ""),
         );
       }
       if (assignedCount > 0 && assignGroupId) {
@@ -1076,34 +1129,82 @@ export function TasksPage() {
         )}
 
         {mode === "assign" && (
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="text-sm text-slate-600">
-              Assign for date
-              <input
-                type="date"
-                required
-                className="mt-1 w-full rounded-lg border px-3 py-2.5 text-sm"
-                value={forDate}
-                onChange={(e) => setForDate(e.target.value)}
-              />
-            </label>
-            <label className="text-sm text-slate-600">
-              Group
-              <select
-                className="mt-1 w-full rounded-lg border px-3 py-2.5 text-sm"
-                value={groupId}
-                onChange={(e) => setGroupId(e.target.value)}
-                required
+          <>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setAssignTarget("group")}
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium ${assignTarget === "group" ? "bg-teal-700 text-white" : "border bg-white"}`}
               >
-                <option value="">Select group…</option>
-                {groups.map((g) => (
-                  <option key={g.id} value={g.id}>
-                    {g.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
+                Assign to group
+              </button>
+              <button
+                type="button"
+                onClick={() => setAssignTarget("individual")}
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium ${assignTarget === "individual" ? "bg-teal-700 text-white" : "border bg-white"}`}
+              >
+                Assign to individual intern(s)
+              </button>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="text-sm text-slate-600">
+                Assign for date
+                <input
+                  type="date"
+                  required
+                  className="mt-1 w-full rounded-lg border px-3 py-2.5 text-sm"
+                  value={forDate}
+                  onChange={(e) => setForDate(e.target.value)}
+                />
+              </label>
+
+              {assignTarget === "group" ? (
+                <div className="text-sm text-slate-600">
+                  <span className="block">Group</span>
+                  <input
+                    className="mt-1 w-full rounded-lg border px-3 py-2.5 text-sm"
+                    placeholder="Search group…"
+                    value={groupSearch}
+                    onChange={(e) => setGroupSearch(e.target.value)}
+                  />
+                  <select
+                    className="mt-1 w-full rounded-lg border px-3 py-2.5 text-sm"
+                    value={groupId}
+                    onChange={(e) => setGroupId(e.target.value)}
+                    required
+                  >
+                    <option value="">Select group…</option>
+                    {filteredGroups.map((g) => (
+                      <option key={g.id} value={g.id}>
+                        {g.name}
+                      </option>
+                    ))}
+                  </select>
+                  {filteredGroups.length === 0 && (
+                    <p className="mt-1 text-xs text-slate-500">No active groups match your search.</p>
+                  )}
+                </div>
+              ) : (
+                <div className="sm:col-span-2">
+                  <p className="mb-1 text-sm text-slate-600">Select intern(s)</p>
+                  <InternPicker
+                    colleges={assignColleges}
+                    noCollege={assignNoCollege}
+                    selected={selectedInternIds}
+                    onToggle={(internId) =>
+                      setSelectedInternIds((prev) =>
+                        prev.includes(internId) ? prev.filter((id) => id !== internId) : [...prev, internId],
+                      )
+                    }
+                    search={internSearch}
+                    onSearchChange={setInternSearch}
+                    loading={assignPoolLoading}
+                  />
+                </div>
+              )}
+            </div>
+          </>
         )}
 
         {mode === "assign" && !libraryTaskId && (

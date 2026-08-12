@@ -175,6 +175,9 @@ type Props = {
   onOpenGroup: (name: string) => void;
   onOpenIntern: (internId: string, label?: string) => void;
   onOpenDay: (date: string) => void;
+  /** Show Complete / Reopen for intern dossier (Admin/HR/Trainer) */
+  canManageIntern?: boolean;
+  onInternUpdated?: () => void;
 };
 
 export function AnalyticsDrillPanel({
@@ -185,6 +188,8 @@ export function AnalyticsDrillPanel({
   onOpenGroup,
   onOpenIntern,
   onOpenDay,
+  canManageIntern,
+  onInternUpdated,
 }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -192,6 +197,33 @@ export function AnalyticsDrillPanel({
   const [day, setDay] = useState<DayPayload | null>(null);
   const [dossier, setDossier] = useState<InternDossier | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [statusBusy, setStatusBusy] = useState(false);
+
+  async function reloadDossier() {
+    if (frame.kind !== "intern") return;
+    const r = await api.get(`/attendance/report/intern/${frame.internId}?period=month&attLimit=10&taskLimit=10`);
+    setDossier(r.data);
+  }
+
+  async function toggleInternComplete() {
+    if (frame.kind !== "intern" || !dossier) return;
+    const next = dossier.intern.internshipStatus === "COMPLETED" ? "ACTIVE" : "COMPLETED";
+    const msg =
+      next === "COMPLETED"
+        ? `Mark ${dossier.intern.fullName}'s internship COMPLETED?`
+        : `Reopen ${dossier.intern.fullName}'s internship?`;
+    if (!confirm(msg)) return;
+    setStatusBusy(true);
+    try {
+      await api.patch(`/interns/${frame.internId}/status`, { internshipStatus: next });
+      await reloadDossier();
+      onInternUpdated?.();
+    } catch {
+      setError("Could not update internship status.");
+    } finally {
+      setStatusBusy(false);
+    }
+  }
 
   useEffect(() => {
     setLoading(true);
@@ -344,14 +376,26 @@ export function AnalyticsDrillPanel({
             </p>
           )}
         </div>
-        <button
-          type="button"
-          disabled={exporting || loading}
-          onClick={exportCurrent}
-          className="rounded-lg bg-teal-700 px-3 py-2 text-sm text-white hover:bg-teal-800 disabled:opacity-50"
-        >
-          {exporting ? "Exporting…" : "Export Excel dashboard"}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {canManageIntern && frame.kind === "intern" && dossier && (
+            <button
+              type="button"
+              disabled={statusBusy || loading}
+              onClick={() => void toggleInternComplete()}
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              {dossier.intern.internshipStatus === "COMPLETED" ? "Reopen internship" : "Mark internship complete"}
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={exporting || loading}
+            onClick={exportCurrent}
+            className="rounded-lg bg-teal-700 px-3 py-2 text-sm text-white hover:bg-teal-800 disabled:opacity-50"
+          >
+            {exporting ? "Exporting…" : "Export Excel dashboard"}
+          </button>
+        </div>
       </div>
 
       {loading && <p className="text-sm text-slate-500">Loading…</p>}

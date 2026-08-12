@@ -34,6 +34,8 @@ async function ensureActiveMembership(tx: any, groupId: string, internId: string
 
 router.get("/", requireRole("ADMIN", "HR", "TRAINER", "INTERN", "COLLEGE"), async (req, res) => {
   const role = req.user!.role;
+  const activeOnly = req.query.activeOnly === "1" || req.query.forAssign === "1";
+  const activeGroupWhere = activeOnly ? { internshipStatus: "ACTIVE" as const } : {};
 
   if (role === "TRAINER") {
     const myIds = await getTrainerGroupIds(req.user!.id);
@@ -41,7 +43,7 @@ router.get("/", requireRole("ADMIN", "HR", "TRAINER", "INTERN", "COLLEGE"), asyn
       where: {
         id: { in: myIds },
         isActive: true,
-        // Hide empty leftover groups from demos / mis-assigns
+        ...activeGroupWhere,
         members: { some: { isActive: true, intern: { approvalStatus: "APPROVED" } } },
       },
       include: {
@@ -80,6 +82,7 @@ router.get("/", requireRole("ADMIN", "HR", "TRAINER", "INTERN", "COLLEGE"), asyn
     const groups = await prisma.trainingGroup.findMany({
       where: {
         isActive: true,
+        ...activeGroupWhere,
         members: {
           some: {
             isActive: true,
@@ -103,7 +106,7 @@ router.get("/", requireRole("ADMIN", "HR", "TRAINER", "INTERN", "COLLEGE"), asyn
   }
 
   const groups = await prisma.trainingGroup.findMany({
-    where: { isActive: true },
+    where: { isActive: true, ...activeGroupWhere },
     include: {
       trainer: { select: { id: true, fullName: true, email: true } },
       trainers: { include: { trainer: { select: { id: true, fullName: true, email: true } } } },
@@ -145,6 +148,7 @@ router.get("/available-interns", requireRole("ADMIN", "HR", "TRAINER"), async (r
   const profiles = await prisma.internProfile.findMany({
     where: {
       approvalStatus: "APPROVED",
+      internshipStatus: "ACTIVE",
       ...scopeWhere,
       user: {
         isActive: true,

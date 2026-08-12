@@ -3,6 +3,10 @@ import { Pencil, Trash2, X } from "lucide-react";
 import { api } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { PageHeader } from "../../components/ui/PageHeader";
+import {
+  AnalyticsDrillPanel,
+  type DrillFrame,
+} from "./analytics/AnalyticsDrillPanel";
 
 type College = { id: string; name: string };
 type UserRow = {
@@ -10,7 +14,13 @@ type UserRow = {
   email: string;
   fullName: string;
   role: string;
-  internProfile?: { id?: string; collegeId?: string | null; college?: { name: string } | null; phone?: string | null } | null;
+  internProfile?: {
+    id?: string;
+    collegeId?: string | null;
+    internshipStatus?: string;
+    college?: { name: string } | null;
+    phone?: string | null;
+  } | null;
   trainerProfile?: { phone?: string | null } | null;
   collegeProfile?: { collegeId?: string; college?: { name: string } | null; phone?: string | null } | null;
 };
@@ -27,6 +37,8 @@ const emptyForm = {
 export function UsersPage() {
   const { user: me } = useAuth();
   const isAdmin = me?.role === "ADMIN";
+  const canManageIntern =
+    me?.role === "ADMIN" || me?.role === "HR" || me?.role === "TRAINER";
   const [users, setUsers] = useState<UserRow[]>([]);
   const [colleges, setColleges] = useState<College[]>([]);
   const [form, setForm] = useState(emptyForm);
@@ -34,6 +46,8 @@ export function UsersPage() {
   const [editForm, setEditForm] = useState({ fullName: "", email: "", password: "", phone: "", collegeId: "" });
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
+  const [drill, setDrill] = useState<DrillFrame[]>([]);
+  const currentDrill = drill[drill.length - 1] ?? null;
 
   async function load() {
     const [u, c] = await Promise.all([api.get("/users"), api.get("/colleges")]);
@@ -47,6 +61,24 @@ export function UsersPage() {
   useEffect(() => {
     void load();
   }, []);
+
+  function pushDrill(frame: DrillFrame) {
+    setDrill((d) => [...d, frame]);
+  }
+  function popDrill() {
+    setDrill((d) => d.slice(0, -1));
+  }
+  function openIntern(u: UserRow) {
+    const id = u.internProfile?.id;
+    if (!id) return;
+    pushDrill({ kind: "intern", internId: id, label: u.fullName });
+  }
+  function openCollege(name: string) {
+    pushDrill({ kind: "college", name });
+  }
+  function openGroup(name: string) {
+    pushDrill({ kind: "group", name });
+  }
 
   function roleOptions() {
     if (isAdmin) {
@@ -119,8 +151,8 @@ export function UsersPage() {
         fullName: editForm.fullName,
         email: editForm.email,
         ...(editForm.password ? { password: editForm.password } : {}),
-        phone: editForm.phone || null,
-        ...(editForm.collegeId ? { collegeId: editForm.collegeId } : {}),
+        phone: editForm.phone || undefined,
+        collegeId: editForm.collegeId || undefined,
       });
       setEditing(null);
       setMsg("User updated");
@@ -146,6 +178,69 @@ export function UsersPage() {
 
   function collegeName(u: UserRow) {
     return u.internProfile?.college?.name || u.collegeProfile?.college?.name || "—";
+  }
+
+  function internStatusBadge(u: UserRow) {
+    if (u.role !== "INTERN" || !u.internProfile?.internshipStatus) return null;
+    const done = u.internProfile.internshipStatus === "COMPLETED";
+    return (
+      <span
+        className={`ml-2 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+          done ? "bg-slate-200 text-slate-600" : "bg-green-100 text-green-800"
+        }`}
+      >
+        {u.internProfile.internshipStatus}
+      </span>
+    );
+  }
+
+  function nameCell(u: UserRow) {
+    if (u.role === "INTERN" && u.internProfile?.id) {
+      return (
+        <button
+          type="button"
+          onClick={() => openIntern(u)}
+          className="font-medium text-green-800 underline-offset-2 hover:underline"
+        >
+          {u.fullName}
+        </button>
+      );
+    }
+    return <span className="font-medium">{u.fullName}</span>;
+  }
+
+  function emailCell(u: UserRow) {
+    if (u.role === "INTERN" && u.internProfile?.id) {
+      return (
+        <button
+          type="button"
+          onClick={() => openIntern(u)}
+          className="text-left text-green-800 underline-offset-2 hover:underline break-all"
+        >
+          {u.email}
+        </button>
+      );
+    }
+    return u.email;
+  }
+
+  if (currentDrill) {
+    return (
+      <div>
+        <PageHeader title="Users" subtitle="Student / intern analytics drill-down" />
+        <AnalyticsDrillPanel
+          frame={currentDrill}
+          filterQuery=""
+          onBack={popDrill}
+          onOpenCollege={openCollege}
+          onOpenGroup={openGroup}
+          onOpenIntern={(internId, label) => pushDrill({ kind: "intern", internId, label })}
+          onOpenDay={(date) => pushDrill({ kind: "day", date })}
+          canManageIntern={canManageIntern}
+          onInternUpdated={() => void load()}
+        />
+      </div>
+    );
   }
 
   return (
@@ -187,14 +282,15 @@ export function UsersPage() {
       {msg && <p className="mb-3 text-sm text-green-700">{msg}</p>}
       {err && <p className="mb-3 text-sm text-red-600">{err}</p>}
 
-      {/* Mobile cards */}
+      <p className="mb-3 text-xs text-slate-500">Click an intern&apos;s name or email to open full analytics.</p>
+
       <div className="space-y-3 md:hidden">
         {users.map((u) => (
           <div key={u.id} className="rounded-xl border border-slate-200 bg-white p-4">
             <div className="flex items-start justify-between gap-2">
               <div>
-                <p className="font-semibold text-slate-900">{u.fullName}</p>
-                <p className="text-xs text-slate-500 break-all">{u.email}</p>
+                <p>{nameCell(u)}{internStatusBadge(u)}</p>
+                <p className="text-xs text-slate-500 break-all">{emailCell(u)}</p>
                 <p className="mt-1 text-xs">
                   <span className="rounded bg-slate-100 px-2 py-0.5 font-medium">{u.role}</span>
                   <span className="ml-2 text-slate-500">{collegeName(u)}</span>
@@ -217,7 +313,6 @@ export function UsersPage() {
         ))}
       </div>
 
-      {/* Desktop table */}
       <div className="hidden overflow-x-auto rounded-xl border border-slate-200 bg-white md:block">
         <table className="min-w-full text-left text-sm">
           <thead className="border-b bg-slate-50 text-slate-500">
@@ -232,8 +327,11 @@ export function UsersPage() {
           <tbody>
             {users.map((u) => (
               <tr key={u.id} className="border-b last:border-0">
-                <td className="px-4 py-3 font-medium">{u.fullName}</td>
-                <td className="px-4 py-3">{u.email}</td>
+                <td className="px-4 py-3">
+                  {nameCell(u)}
+                  {internStatusBadge(u)}
+                </td>
+                <td className="px-4 py-3">{emailCell(u)}</td>
                 <td className="px-4 py-3">{u.role}</td>
                 <td className="px-4 py-3">{collegeName(u)}</td>
                 <td className="px-4 py-3">
